@@ -26,6 +26,7 @@ from .operators import room_dim_overlay
 from .operators import ops_general
 from .operators import ops_surfaces
 from .operators import ops_room_dressing
+from .operators import ops_wall_panels
 from .product_libraries import closets
 from .product_libraries import face_frame
 from .product_libraries import frameless
@@ -46,7 +47,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Home Builder 5",
     "author": "Andrew Peel",
-    "version": (5, 2, 7),
+    "version": (5, 2, 5),
     "blender": (5, 1, 0),
     "location": "3D Viewport Sidebar",
     "description": "Library for Designing Interior Spaces",
@@ -389,6 +390,7 @@ def register():
     room_dim_overlay.register()
     ops_general.register()
     ops_surfaces.register()
+    ops_wall_panels.register()
     ops.register()
     view3d_sidebar.register()
     try:
@@ -443,6 +445,7 @@ def unregister():
     room_dim_overlay.unregister()
     ops_stairs.unregister()
     ops_surfaces.unregister()
+    ops_wall_panels.unregister()
     ops_general.unregister()
     ops.unregister()
     view3d_sidebar.unregister()
