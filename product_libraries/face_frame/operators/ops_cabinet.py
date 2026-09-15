@@ -586,141 +586,6 @@ class hb_face_frame_OT_equalize_opening_heights(bpy.types.Operator):
 
 
 # ---------------------------------------------------------------------------
-# Operator: equalize front heights in a stack of openings
-# ---------------------------------------------------------------------------
-class hb_face_frame_OT_equalize_front_heights(bpy.types.Operator):
-    """Size a stack of openings so their FRONTS come out the same height.
-
-    Equal openings don't give equal fronts: each front adds its own top and
-    bottom overlay, and the top and bottom fronts of a stack overlay the
-    frame's top / bottom rail while the ones between overlay mid rails, or
-    close to a reveal where a mid rail was removed. This keeps the space the
-    openings already take and re-divides it so opening + overlays is the
-    same for each, reading every overlay the way the fronts are built
-    (solver front_overlay on the opening's own rect).
-
-    The stack is the column the active opening sits in: its horizontal split
-    and any horizontal splits nested in it. Selected openings in that column
-    are equalized; with fewer than two selected, every opening in it that
-    carries an overlay front is. The new heights are locked, and a nested
-    split grows or shrinks by its children's change, so the column's total
-    and everything beside it stay put."""
-    bl_idname = "hb_face_frame.equalize_front_heights"
-    bl_label = "Equalize Drawer Front Heights"
-    bl_description = (
-        "Resize the openings stacked with the active opening so their "
-        "fronts all come out the same height"
-    )
-    bl_options = {'REGISTER', 'UNDO'}
-
-    # Fronts that are not an opening plus overlays: nothing to equalize.
-    _SKIP_FRONT_TYPES = frozenset({'NONE', 'APPLIANCE', 'INSET_PANEL'})
-
-    @staticmethod
-    def _is_h_split(obj):
-        return (obj is not None
-                and obj.get('IS_FACE_FRAME_SPLIT_NODE')
-                and obj.face_frame_split.axis == 'H')
-
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return (obj is not None
-                and bool(obj.get('IS_FACE_FRAME_OPENING_CAGE'))
-                and bool(cls._is_h_split(obj.parent)))
-
-    def _stack(self, node):
-        """Front-carrying openings in a column, top to bottom, through
-        nested horizontal splits (a vertical split starts a new column)."""
-        kids = sorted(
-            [c for c in node.children
-             if c.get('IS_FACE_FRAME_OPENING_CAGE')
-             or c.get('IS_FACE_FRAME_SPLIT_NODE')],
-            key=lambda c: c.get('hb_split_child_index', 0))
-        for c in kids:
-            if c.get('IS_FACE_FRAME_OPENING_CAGE'):
-                if (c.face_frame_opening.front_type
-                        not in self._SKIP_FRONT_TYPES):
-                    yield c
-            elif self._is_h_split(c):
-                yield from self._stack(c)
-
-    def execute(self, context):
-        from .. import solver_face_frame as solver
-        active = context.active_object
-        if not self.poll(context):
-            self.report({'WARNING'},
-                        "The active opening is not stacked in a "
-                        "horizontal split")
-            return {'CANCELLED'}
-        top = active.parent
-        while self._is_h_split(top.parent):
-            top = top.parent
-        stack = list(self._stack(top))
-        selected = set(context.selected_objects)
-        picked = [c for c in stack if c == active or c in selected]
-        targets = picked if len(picked) >= 2 else stack
-        if len(targets) < 2:
-            self.report({'WARNING'},
-                        "Need two or more openings with fronts in this stack")
-            return {'CANCELLED'}
-
-        root = types_face_frame.find_cabinet_root(active)
-        bay = _find_bay(active)
-        if root is None or bay is None:
-            self.report({'WARNING'}, "No cabinet found for this opening")
-            return {'CANCELLED'}
-        layout = solver.FaceFrameLayout(root)
-        rects = {r['obj_name']: r for r in solver.bay_openings(
-            layout, bay.get('hb_bay_index', 0)).get('leaves', [])}
-        cab_props = root.face_frame_cabinet
-
-        # (cage, built opening height, top + bottom overlay of its front)
-        spans = []
-        for cage in targets:
-            rect = rects.get(cage.name)
-            if rect is None:
-                self.report({'WARNING'},
-                            "Opening layout is out of date - try again")
-                return {'CANCELLED'}
-            op = cage.face_frame_opening
-            height = rect['cage_dim_z'] - rect['reveal_top'] - rect['reveal_bottom']
-            overlays = (solver.front_overlay(rect, cab_props, op, 'top')
-                        + solver.front_overlay(rect, cab_props, op, 'bottom'))
-            spans.append((cage, height, overlays))
-
-        front_h = (sum(h for _c, h, _o in spans)
-                   + sum(o for _c, _h, o in spans)) / len(spans)
-        if any(front_h - o <= 0.0 for _c, _h, o in spans):
-            self.report({'WARNING'}, "Not enough room to equalize the fronts")
-            return {'CANCELLED'}
-
-        with types_face_frame.suspend_recalc():
-            # A nested split holds its own size in the column above it, so
-            # it takes its children's change to keep the column total.
-            node_delta = {}
-            for cage, height, overlays in spans:
-                new_size = front_h - overlays
-                node = cage.parent
-                while node is not top:
-                    node_delta[node] = (node_delta.get(node, 0.0)
-                                        + new_size - height)
-                    node = node.parent
-                fo = cage.face_frame_opening
-                fo.unlock_size = True
-                fo.size = new_size
-            for node, delta in node_delta.items():
-                sp = node.face_frame_split
-                sp.unlock_size = True
-                sp.size = sp.size + delta
-        types_face_frame.recalculate_face_frame_cabinet(root)
-        self.report({'INFO'},
-                    f"Equalized {len(spans)} front(s) at "
-                    f"{meter_to_inch(front_h):.4f}\"")
-        return {'FINISHED'}
-
-
-# ---------------------------------------------------------------------------
 # Selection mode application (highlights matching objects, dims others)
 # ---------------------------------------------------------------------------
 # Module-level so non-operator callers (the live-preview appliance dialog)
@@ -2322,78 +2187,38 @@ class hb_face_frame_OT_drawer_box_prompts(bpy.types.Operator):
         return {'FINISHED'}
 
 
-def rollout_above_target(obj):
-    """(opening_obj, focus_index) for the Rollout Above Drawer dialog.
-
-    Reachable from the drawer box, from the drawer opening cage, and from
-    any rollout the cabinet built above the drawer - so the rollouts can
-    be edited by selecting them, and the dialog is still there if the
-    drawer box is not. focus_index is the clicked rollout's place in the
-    top-down list, -1 otherwise. (None, -1) when obj is none of those.
-    """
-    if obj is None:
-        return None, -1
-    opening = _find_owning_opening(obj)
-    if opening is None:
-        return None, -1
-    op_props = opening.face_frame_opening
-    if op_props.front_type not in types_face_frame.DRAWER_BOX_FRONT_TYPES:
-        return None, -1
-    if obj == opening or obj.get('IS_DRAWER_BOX'):
-        return opening, -1
-    if obj.get('hb_part_role') == types_face_frame.PART_ROLE_ROLLOUT_BOX:
-        item = types_face_frame.rollout_item_props(
-            opening, obj.get(types_face_frame.TAG_ROLLOUT_ITEM_INDEX, -1))
-        mark = types_face_frame.FaceFrameCabinet.ROLLOUT_ABOVE_MARK
-        if item is not None and item.get(mark):
-            built = len(item.rollout_boxes)
-            box_index = obj.get(types_face_frame.TAG_ROLLOUT_BOX_INDEX, -1)
-            # Boxes stack bottom to top; the list reads top down.
-            focus = built - 1 - box_index if 0 <= box_index < built else -1
-            return opening, focus
-    return None, -1
-
-
-def _recalc_opening_cabinet(opening_obj):
-    root = types_face_frame.find_cabinet_root(opening_obj)
-    if root is not None:
-        types_face_frame.recalculate_face_frame_cabinet(root)
-
-
 class hb_face_frame_OT_rollout_above_drawer_prompts(bpy.types.Operator):
-    """Rollouts above this drawer, behind the same front.
+    """Add a rollout above this drawer, behind the same front.
 
-    Right-click entry on a drawer box, on its opening, and on the
-    rollouts themselves. The list lives on the owning opening (boxes are
-    wiped and rebuilt every recalc) and live-binds, so the rollouts and
-    the drawer box under them rebuild as the user picks sizes.
+    Right-click entry on a drawer box, alongside the other box options.
+    Like them the settings live on the owning opening (boxes are wiped
+    and rebuilt every recalc) and live-bind, so the drawer box shortens
+    and the rollout appears as the user types.
     """
     bl_idname = "hb_face_frame.rollout_above_drawer_prompts"
     bl_label = "Rollout Above Drawer"
-    bl_description = ("Rollouts above this drawer's box, behind the same "
-                      "front. The drawer box takes a standard height "
-                      "under them")
+    bl_description = ("Add a rollout above this drawer's box, behind the "
+                      "same front. The drawer box shortens to make room")
     bl_options = {'UNDO'}
 
     opening_name: bpy.props.StringProperty(
         default='', options={'HIDDEN', 'SKIP_SAVE'},
     )  # type: ignore
-    focus_index: bpy.props.IntProperty(
-        default=-1, options={'HIDDEN', 'SKIP_SAVE'},
-    )  # type: ignore
 
     @classmethod
     def poll(cls, context):
-        return rollout_above_target(context.active_object)[0] is not None
+        obj = context.active_object
+        if obj is None or not obj.get('IS_DRAWER_BOX'):
+            return False
+        return _find_owning_opening(obj) is not None
 
     def invoke(self, context, event):
-        opening_obj, focus = rollout_above_target(context.active_object)
+        opening_obj = _find_owning_opening(context.active_object)
         if opening_obj is None:
-            self.report({'WARNING'}, "No drawer opening found")
+            self.report({'WARNING'}, "No owning opening found")
             return {'CANCELLED'}
         self.opening_name = opening_obj.name
-        self.focus_index = focus
-        return context.window_manager.invoke_props_dialog(self, width=320)
+        return context.window_manager.invoke_props_dialog(self, width=300)
 
     def draw(self, context):
         layout = self.layout
@@ -2402,95 +2227,18 @@ class hb_face_frame_OT_rollout_above_drawer_prompts(bpy.types.Operator):
             layout.label(text="Opening not found", icon='INFO')
             return
         op_props = opening_obj.face_frame_opening
-        cab = types_face_frame.FaceFrameCabinet
-        rollouts = op_props.rollouts_above
-        built = opening_obj.get(cab.TAG_ROLLOUT_ABOVE_BUILT, len(rollouts))
-
         col = layout.column(align=True)
-        col.label(text="Rollouts (top down)")
-        if not rollouts:
-            col.label(text="None - add one below", icon='BLANK1')
-        for index, entry in enumerate(rollouts):
-            row = col.row(align=True)
-            row.label(text=f"Rollout {index + 1}",
-                      icon=('RIGHTARROW' if index == self.focus_index
-                            else 'BLANK1'))
-            field = row.row(align=True)
-            # Left out of the build: it would squeeze out the drawer box.
-            field.alert = index >= built
-            field.prop(entry, 'height_preset', text="")
-            rm = row.operator("hb_face_frame.remove_rollout_above",
-                              text="", icon='X')
-            rm.opening_name = opening_obj.name
-            rm.index = index
-        add = col.operator("hb_face_frame.add_rollout_above",
-                           text="Add Rollout", icon='ADD')
-        add.opening_name = opening_obj.name
-        skipped = len(rollouts) - built
-        if skipped > 0:
-            col.label(text=f"{skipped} rollout(s) don't fit and are not built",
-                      icon='ERROR')
-
-        layout.separator()
-        col = layout.column(align=True)
-        col.enabled = len(rollouts) > 0
-        col.prop(op_props, 'rollout_above_drawer_box_height',
-                 text="Drawer Box")
-        drawer_dz = opening_obj.get(cab.TAG_ROLLOUT_ABOVE_DRAWER_DZ, 0.0)
-        if rollouts and drawer_dz > 0.0:
-            col.label(text=f'Drawer box is {drawer_dz / 0.0254:g}" tall')
-        if rollouts and not opening_obj.get(cab.TAG_ROLLOUT_ABOVE_PICK_FITS, 1):
-            col.label(text="That box doesn't fit; the largest that does "
-                           "is used", icon='ERROR')
+        col.prop(op_props, 'rollout_above_drawer', text="Rollout Above Drawer")
+        sub = col.column(align=True)
+        sub.enabled = op_props.rollout_above_drawer
+        sub.prop(op_props, 'rollout_above_height', text="Rollout Height")
+        sub.prop(op_props, 'rollout_above_gap', text="Gap Above Drawer")
         col.separator()
-        col.label(text='Rollouts hang 5/16" under the opening, 7/8" apart',
+        col.label(text="The drawer box shortens to fit underneath",
                   icon='INFO')
 
     def execute(self, context):
         # Live-bound via the opening props' update callbacks.
-        return {'FINISHED'}
-
-
-class hb_face_frame_OT_add_rollout_above(bpy.types.Operator):
-    """Add a rollout above a drawer, under the ones already there."""
-    bl_idname = "hb_face_frame.add_rollout_above"
-    bl_label = "Add Rollout Above Drawer"
-    bl_description = ("Add a rollout above this drawer, under any rollouts "
-                      "already there")
-    bl_options = {'UNDO'}
-
-    opening_name: bpy.props.StringProperty(default='')  # type: ignore
-
-    def execute(self, context):
-        opening_obj = bpy.data.objects.get(self.opening_name)
-        if opening_obj is None:
-            opening_obj = rollout_above_target(context.active_object)[0]
-        if opening_obj is None:
-            return {'CANCELLED'}
-        opening_obj.face_frame_opening.rollouts_above.add()
-        _recalc_opening_cabinet(opening_obj)
-        return {'FINISHED'}
-
-
-class hb_face_frame_OT_remove_rollout_above(bpy.types.Operator):
-    """Remove one rollout from above a drawer."""
-    bl_idname = "hb_face_frame.remove_rollout_above"
-    bl_label = "Remove Rollout Above Drawer"
-    bl_description = "Remove this rollout; the drawer box grows back"
-    bl_options = {'UNDO'}
-
-    opening_name: bpy.props.StringProperty(default='')  # type: ignore
-    index: bpy.props.IntProperty(default=-1)  # type: ignore
-
-    def execute(self, context):
-        opening_obj = bpy.data.objects.get(self.opening_name)
-        if opening_obj is None:
-            return {'CANCELLED'}
-        rollouts = opening_obj.face_frame_opening.rollouts_above
-        if not (0 <= self.index < len(rollouts)):
-            return {'CANCELLED'}
-        rollouts.remove(self.index)
-        _recalc_opening_cabinet(opening_obj)
         return {'FINISHED'}
 
 
@@ -6997,7 +6745,6 @@ classes = (
     hb_face_frame_OT_break_cabinet_both,
     hb_face_frame_OT_equalize_bays,
     hb_face_frame_OT_equalize_opening_heights,
-    hb_face_frame_OT_equalize_front_heights,
     hb_face_frame_OT_wood_top_prompts,
     hb_face_frame_OT_toggle_mode,
     hb_face_frame_OT_cabinet_prompts,
@@ -7026,8 +6773,6 @@ classes = (
     hb_face_frame_OT_drawer_box_prompts,
     hb_face_frame_OT_sink_duo_drawer_prompts,
     hb_face_frame_OT_rollout_above_drawer_prompts,
-    hb_face_frame_OT_add_rollout_above,
-    hb_face_frame_OT_remove_rollout_above,
     hb_face_frame_OT_sink_duo_rollout_prompts,
     hb_face_frame_OT_split_opening,
     hb_face_frame_OT_mid_stile_prompts,

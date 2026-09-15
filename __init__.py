@@ -13,6 +13,7 @@ from .operators import rooms
 from .operators import details
 from .operators import ops_obstacles
 from .operators import export
+from .operators import export_bom
 from .operators import ops_stairs
 from .operators import scene_navigator
 from .operators import room_palette
@@ -45,7 +46,7 @@ from bpy.app.handlers import persistent
 bl_info = {
     "name": "Home Builder 5",
     "author": "Andrew Peel",
-    "version": (5, 2, 6),
+    "version": (5, 2, 5),
     "blender": (5, 1, 0),
     "location": "3D Viewport Sidebar",
     "description": "Library for Designing Interior Spaces",
@@ -375,6 +376,7 @@ def register():
     details.register()
     doors_windows.register()
     export.register()
+    export_bom.register()
     ops_stairs.register()
     layout_lock.register()
     scene_navigator.register()
@@ -429,6 +431,7 @@ def unregister():
     details.unregister()
     doors_windows.unregister()
     export.unregister()
+    export_bom.unregister()
     options_panel.unregister()
     library_panel.unregister()
     ops_room_dressing.unregister()

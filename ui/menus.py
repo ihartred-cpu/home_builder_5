@@ -62,6 +62,7 @@ class HOME_BUILDER_MT_main_menu(bpy.types.Menu):
         
         # Export
         layout.operator("home_builder.prepare_for_export", icon='EXPORT')
+        layout.operator("home_builder.export_bom", text="Export BOM (CSV)", icon='SPREADSHEET')
 
 
 class HOME_BUILDER_MT_wall_commands(bpy.types.Menu):

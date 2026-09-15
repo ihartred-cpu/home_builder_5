@@ -5599,65 +5599,6 @@ def _update_rollout_box_preset(self, context):
     _update_cabinet_dim(self, context)
 
 
-# A rollout riding above a drawer picks from the standard sizes only -
-# there is no Custom, the box is bought in these heights.
-ROLLOUT_ABOVE_HEIGHT_ITEMS = [
-    entry for entry in ROLLOUT_HEIGHT_PRESET_ITEMS if entry[0] != 'CUSTOM']
-
-
-def rollout_height_inches(preset):
-    """Inch height of a standard rollout preset id (3 5/8 when unknown)."""
-    return _ROLLOUT_HEIGHT_PRESETS_IN.get(preset, 3.625)
-
-
-def nearest_rollout_height_preset(height):
-    """The standard rollout preset closest to `height` (scene units);
-    a tie goes to the smaller box. Maps a typed height forward onto the
-    standard list."""
-    return min(_ROLLOUT_HEIGHT_PRESETS_IN.items(),
-               key=lambda kv: (abs(units.inch(kv[1]) - height), kv[1]))[0]
-
-
-# Drawer box under rollouts: the same standard heights the stock box
-# sizing uses (types_face_frame.STOCK_DRAWER_BOX_HEIGHTS), plus Auto for
-# the largest one that fits.
-_DRAWER_BOX_HEIGHTS_IN = {
-    'IN_2_125': 2.125,
-    'IN_3_125': 3.125,
-    'IN_3_625': 3.625,
-    'IN_4_125': 4.125,
-    'IN_5_125': 5.125,
-    'IN_6_125': 6.125,
-    'IN_7_125': 7.125,
-    'IN_8_125': 8.125,
-    'IN_9_125': 9.125,
-    'IN_10_125': 10.125,
-    'IN_11_125': 11.125,
-}
-
-ROLLOUT_ABOVE_DRAWER_BOX_ITEMS = [
-    ('AUTO',      "Largest That Fits",
-     "The tallest standard drawer box that leaves the minimum gap under "
-     "the lowest rollout", 0),
-    ('IN_2_125',  '2 1/8"',  'Standard 2 1/8" drawer box height', 1),
-    ('IN_3_125',  '3 1/8"',  'Standard 3 1/8" drawer box height', 2),
-    ('IN_3_625',  '3 5/8"',  'Standard 3 5/8" drawer box height', 3),
-    ('IN_4_125',  '4 1/8"',  'Standard 4 1/8" drawer box height', 4),
-    ('IN_5_125',  '5 1/8"',  'Standard 5 1/8" drawer box height', 5),
-    ('IN_6_125',  '6 1/8"',  'Standard 6 1/8" drawer box height', 6),
-    ('IN_7_125',  '7 1/8"',  'Standard 7 1/8" drawer box height', 7),
-    ('IN_8_125',  '8 1/8"',  'Standard 8 1/8" drawer box height', 8),
-    ('IN_9_125',  '9 1/8"',  'Standard 9 1/8" drawer box height', 9),
-    ('IN_10_125', '10 1/8"', 'Standard 10 1/8" drawer box height', 10),
-    ('IN_11_125', '11 1/8"', 'Standard 11 1/8" drawer box height', 11),
-]
-
-
-def drawer_box_height_inches(preset):
-    """Inch height of a standard drawer box preset id, None for AUTO."""
-    return _DRAWER_BOX_HEIGHTS_IN.get(preset)
-
-
 def _update_galley_size(self, context):
     """A workstation cabinet's size: width and bay widths follow it."""
     from . import types_face_frame
@@ -8930,19 +8871,6 @@ class Face_Frame_Rollout_Box(bpy.types.PropertyGroup):
     )  # type: ignore
 
 
-class Face_Frame_Rollout_Above(bpy.types.PropertyGroup):
-    """One rollout riding above a drawer box, behind the same front.
-    Listed top down; each picks its own standard height. The cabinet
-    places them from the top of the opening and sizes the drawer box
-    below (types_face_frame.rollout_above_layout)."""
-    height_preset: EnumProperty(
-        name="Rollout Height",
-        description="Standard height of this rollout box",
-        items=ROLLOUT_ABOVE_HEIGHT_ITEMS, default='IN_3_625',
-        update=_update_cabinet_dim,
-    )  # type: ignore
-
-
 class Face_Frame_Interior_Item(bpy.types.PropertyGroup):
     """One interior item attached to an opening - shelf, accessory, etc.
     Holds every kind's data side-by-side; the recalc reads only the
@@ -9554,33 +9482,28 @@ class Face_Frame_Opening_Props(PropertyGroup):
     # box itself is wiped and rebuilt every recalc, so the user's size
     # lives here on the persistent opening cage. An un-overridden axis
     # keeps the auto fit (opening hole minus the scene clearances).
-    # Rollouts riding above the drawer box, behind the same front, top
-    # down. The drawer box takes a standard height under the lowest one
-    # (see types_face_frame.rollout_above_layout).
-    rollouts_above: CollectionProperty(
-        type=Face_Frame_Rollout_Above)  # type: ignore
-    rollout_above_drawer_box_height: EnumProperty(
-        name="Drawer Box Height",
-        description="Standard height of the drawer box under the "
-                    "rollouts. A smaller box leaves a bigger gap",
-        items=ROLLOUT_ABOVE_DRAWER_BOX_ITEMS, default='AUTO',
-        update=_update_cabinet_dim,
-    )  # type: ignore
-    # LEGACY - the first version's single rollout: an on/off, a free
-    # height and a typed gap. Still read once to carry a saved file
-    # forward onto rollouts_above (then switched off); nothing else
-    # reads them.
+    # A rollout riding above the drawer box, behind the same front:
+    # one front, a drawer below and a rollout over it. The drawer box
+    # gives up the height (see _create_drawer_box_for_front), so the
+    # bottom gap no longer has to be set by hand.
     rollout_above_drawer: BoolProperty(
-        name="Rollout Above Drawer (Legacy)",
+        name="Rollout Above Drawer",
+        description="Add a rollout above this drawer's box, behind the "
+                    "same front. The drawer box shortens to make room",
         default=False, update=_update_cabinet_dim,
     )  # type: ignore
     rollout_above_height: FloatProperty(
-        name="Rollout Height (Legacy)",
+        name="Rollout Height",
+        description="Height of the rollout box above the drawer",
         default=units.inch(4.0), min=0.0, unit='LENGTH', precision=4,
+        update=_update_cabinet_dim,
     )  # type: ignore
     rollout_above_gap: FloatProperty(
-        name="Gap Above Drawer (Legacy)",
+        name="Gap Above Drawer",
+        description="Clear space between the top of the drawer box and "
+                    "the underside of the rollout",
         default=units.inch(1.0), min=0.0, unit='LENGTH', precision=4,
+        update=_update_cabinet_dim,
     )  # type: ignore
 
     drawer_box_override_width: BoolProperty(
@@ -9921,8 +9844,8 @@ class Face_Frame_Splitter_Width(PropertyGroup):
         name="Remove Member",
         description=(
             "Drop this splitter's face-frame member (and its carcass backing). "
-            "The opening stays split; the two openings share its width and "
-            "their fronts sit 3/32\" apart. Used between drawers"
+            "The opening stays split; the solver collapses the gap so the two "
+            "fronts sit 3/32\" apart. Used between drawers"
         ),
         default=False,
         update=_update_cabinet_dim,
@@ -12160,17 +12083,8 @@ def _update_wood_top_nosing_style(self, context):
     thickness -- a nosing a different thickness than the top it edges is
     the exception, not the norm, so the property default (2") was the
     wrong starting point. A height the user dialed in is left alone.
-
-    An applied-edge build made for one stock thickness (bullnose trim,
-    crown under edge, ...) sets the top to that thickness, so its band
-    meets the board top and bottom.
     """
     global _SEEDING_NOSING_HEIGHT
-    want = wood_top_edge.STYLE_THICKNESS.get(self.nosing_style)
-    if want is not None and abs(self.thickness - want) > 0.0001:
-        # Writing the thickness runs its own update, which rebuilds.
-        self.thickness = want
-        return
     if (self.nosing_style in shelf_nosing.EXTRA_HEIGHT_STYLES
             and not self.get('nosing_height_set')
             and abs(self.nosing_height - self.thickness) > 0.0001):
@@ -12533,7 +12447,6 @@ classes = (
     Face_Frame_Cabinet_Props,
     Face_Frame_Bay_Props,
     Face_Frame_Rollout_Box,
-    Face_Frame_Rollout_Above,
     Face_Frame_Interior_Item,
     Face_Frame_Interior_Region_Props,
     Face_Frame_Drawer_Look_Opening,
