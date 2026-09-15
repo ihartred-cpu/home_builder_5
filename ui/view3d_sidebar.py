@@ -652,6 +652,23 @@ class HOME_BUILDER_PT_room_layout_floor(bpy.types.Panel):
         layout.operator("home_builder_walls.add_ceiling")
 
 
+# SUBPANEL: Wall Panels
+class HOME_BUILDER_PT_room_layout_wall_panels(bpy.types.Panel):
+    bl_label = "Wall Panels"
+    bl_idname = "HOME_BUILDER_PT_room_layout_wall_panels"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = CATEGORY_NAME
+    bl_parent_id = "HOME_BUILDER_PT_room_layout"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("home_builder.add_wall_panel", icon='MESH_PLANE')
+        layout.label(text="Select an opening, then right-click for "
+                          "Split / Front / Resize.", icon='INFO')
+
+
 # SUBPANEL: Lighting
 class HOME_BUILDER_PT_room_layout_lighting(bpy.types.Panel):
     bl_label = "Lighting"
@@ -1552,6 +1569,7 @@ classes = (
     HOME_BUILDER_PT_room_layout_walls,
     HOME_BUILDER_PT_room_layout_doors_windows,
     HOME_BUILDER_PT_room_layout_floor,
+    HOME_BUILDER_PT_room_layout_wall_panels,
     HOME_BUILDER_PT_room_layout_lighting,
     HOME_BUILDER_PT_room_layout_obstacles,
     HOME_BUILDER_PT_room_layout_reference_image,
