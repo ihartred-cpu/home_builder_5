@@ -715,6 +715,13 @@ class HOME_BUILDER_MT_face_frame_interior_part_commands(bpy.types.Menu):
         if (obj is not None
                 and obj.get('hb_part_role')
                 == types_face_frame.PART_ROLE_ROLLOUT_BOX):
+            # A rollout the cabinet built above a drawer is edited from
+            # here too, not only from the drawer box under it.
+            from .operators import ops_cabinet
+            if ops_cabinet.rollout_above_target(obj)[0] is not None:
+                layout.operator("hb_face_frame.rollout_above_drawer_prompts",
+                                text="Rollout Above Drawer...",
+                                icon='TRIA_UP_BAR')
             # Per-box U-notch, the rollout's version of the sink duo
             # drawer. Self-polling: hidden when the box predates the
             # per-box options and its indices don't resolve.
@@ -737,8 +744,18 @@ class HOME_BUILDER_MT_face_frame_interior_part_commands(bpy.types.Menu):
                         text="Finish Opening...", icon='SHADING_RENDERED')
         layout.operator("hb_face_frame.interior_options",
                         text="Interior Options...", icon='MESH_GRID')
-        # A shelf is as worth hand-editing as any other cutpart, and
-        # this is the only menu it has.
+        # A shelf takes cutouts and hand edits like any other cutpart, and
+        # this is the only menu it has. Its cutouts carry across the
+        # interior rebuild (_update_interior_items_in_opening), and so
+        # does a shelf made editable, standing in for the shelf it was.
+        _draw_cutout_items(layout, obj)
+        if (obj is not None and obj.get('IS_MANUAL_PART')
+                and obj.get(types_face_frame.INTERIOR_MANUAL_UNMATCHED)):
+            # The layout no longer builds the shelf this one replaced
+            # (fewer shelves, item removed): it is kept, not rebuilt.
+            layout.separator()
+            layout.label(text="Edited part is no longer in the layout",
+                         icon='ERROR')
         _draw_make_editable_items(layout, obj)
 
         _draw_visibility_items(layout, 'OBJECT', "Part")
@@ -851,6 +868,13 @@ class HOME_BUILDER_MT_face_frame_opening_commands(bpy.types.Menu):
                         text="Finish Opening...", icon='SHADING_RENDERED')
         layout.operator("hb_face_frame.interior_options",
                         text="Interior Options...", icon='MESH_GRID')
+        # On the opening as well as the drawer box, so the rollouts stay
+        # reachable whatever is or isn't built inside.
+        from .operators import ops_cabinet
+        if ops_cabinet.rollout_above_target(context.active_object)[0]:
+            layout.operator("hb_face_frame.rollout_above_drawer_prompts",
+                            text="Rollout Above Drawer...",
+                            icon='TRIA_UP_BAR')
         # Accessories are the host application's catalog; with none
         # registered there is nothing to add, so the entry stays out.
         if accessory_registry.available():
@@ -864,6 +888,9 @@ class HOME_BUILDER_MT_face_frame_opening_commands(bpy.types.Menu):
         layout.separator()
         layout.operator("hb_face_frame.equalize_opening_heights",
                         text="Equalize Opening Heights",
+                        icon='ALIGN_JUSTIFY')
+        layout.operator("hb_face_frame.equalize_front_heights",
+                        text="Equalize Drawer Front Heights",
                         icon='ALIGN_JUSTIFY')
 
         layout.separator()

@@ -588,7 +588,7 @@ def draw_floating_shelf(layout, root):
     row.prop(shelf, 'finish_left', text="Left", toggle=True)
     row.prop(shelf, 'finish_right', text="Right", toggle=True)
 
-    layout.prop(shelf, 'material_thickness', text="Material Thickness")
+    layout.prop(shelf, 'material_thickness', text="Top & Bottom Thickness")
 
     layout.separator()
     layout.operator("hb_face_frame.duplicate_floating_shelf",
@@ -1412,6 +1412,14 @@ def _draw_interior_items_section(layout, target_props, target_name=""):
     box = layout.box()
     for i, item in enumerate(target_props.interior_items):
         sub = box.column(align=True)
+        # Rollouts above a drawer belong to the cabinet; its sizes come
+        # from the Rollout Above Drawer dialog and would be rewritten
+        # here on the next recalc.
+        if item.get(types_face_frame.FaceFrameCabinet.ROLLOUT_ABOVE_MARK):
+            sub.label(text="Rollouts Above Drawer", icon='TRIA_UP_BAR')
+            sub.label(text="Right-click the drawer box or a rollout "
+                           "to edit")
+            continue
         header = sub.row(align=True)
         header.prop(item, 'kind', text="")
         rm = header.operator(

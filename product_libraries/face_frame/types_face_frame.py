@@ -915,6 +915,63 @@ def stock_drawer_box_height(opening_height):
         if opening_in >= min_opening_in - 1.0e-4:
             return inch(box_in)
     return None
+
+
+# Rollouts riding above a drawer box, behind the same front. The top one
+# hangs this far under the opening top; each box after it - the drawer
+# box included - sits a box gap lower (a rollout's top clearance plus a
+# drawer box's bottom clearance).
+ROLLOUT_ABOVE_TOP_CLEARANCE = inch(0.3125)
+ROLLOUT_ABOVE_BOX_GAP = inch(0.875)
+
+
+def rollout_above_layout(opening_bottom, opening_top, rollout_heights,
+                         bottom_clearance, drawer_box_height=None):
+    """Stack rollouts down from the top of a drawer opening and size the
+    drawer box under them.
+
+    Heights are top down. Each rollout sits a box gap under the one
+    above; one is only placed while a smallest stock drawer box still
+    fits under it (a box gap below it, bottom clearance under the box),
+    so the drawer is never squeezed out. The first that doesn't fit and
+    every one after it are left out and counted in 'skipped'.
+
+    The drawer box takes the tallest stock height that fits under the
+    lowest rollout, or `drawer_box_height` when that one fits ('pick_fits'
+    False when it doesn't). All values are scene units, Z up from the
+    opening cage bottom. 'rollouts' is [(bottom_z, height), ...] top down;
+    'drawer_dz' is None when no rollout was placed.
+    """
+    eps = 1.0e-5
+    stock = sorted(inch(box_in) for _min_in, box_in in STOCK_DRAWER_BOX_HEIGHTS)
+    floor = opening_bottom + bottom_clearance
+    top = opening_top - ROLLOUT_ABOVE_TOP_CLEARANCE
+    placed = []
+    for height in rollout_heights:
+        bottom = top - height
+        if bottom - ROLLOUT_ABOVE_BOX_GAP - stock[0] < floor - eps:
+            break
+        placed.append((bottom, height))
+        top = bottom - ROLLOUT_ABOVE_BOX_GAP
+    result = {
+        'rollouts': placed,
+        'skipped': len(rollout_heights) - len(placed),
+        'drawer_dz': None,
+        'drawer_space': None,
+        'pick_fits': True,
+    }
+    if not placed:
+        return result
+    space = top - floor
+    drawer_dz = [h for h in stock if h <= space + eps][-1]
+    if drawer_box_height is not None:
+        if drawer_box_height <= space + eps:
+            drawer_dz = drawer_box_height
+        else:
+            result['pick_fits'] = False
+    result['drawer_dz'] = drawer_dz
+    result['drawer_space'] = space
+    return result
 # Bar storage inserts (wine cubby / cellar / lattice / X / diagonal
 # / half-circle, stemware, plate rack). One role for the whole family:
 # each insert is a single derived mesh built in bar_storage.py; the
@@ -963,6 +1020,148 @@ INTERIOR_PART_ROLES = frozenset({
     PART_ROLE_INTERIOR_FF_RAIL,
     PART_ROLE_INTERIOR_FF_STILE,
 })
+
+# User cutouts (the part menu's Add Cutout) are CPM_CUTOUT modifiers named
+# 'Cutout', 'Cutout.001', ... on the part itself. Interior parts are wiped
+# and rebuilt on every recalc, so the cutouts are read off before the wipe
+# and re-added to the rebuilt part with the same role and build position
+# (INTERIOR_BUILD_INDEX, stamped as each part is built).
+INTERIOR_BUILD_INDEX = 'hb_interior_build_index'
+_USER_CUTOUT_TOKEN = 'CPM_CUTOUT'
+_USER_CUTOUT_NAME = 'Cutout'
+
+# A manual interior part (Make Editable) is left out of the wipe and stands
+# in for the rebuilt part with the same role and build index, which is
+# built and then thrown away. When the rebuild no longer produces that
+# index (fewer shelves, item removed) the hand-edited part is still kept
+# rather than lost, and flagged with this so its menu can say so; Revert
+# to Parametric removes it.
+INTERIOR_MANUAL_UNMATCHED = 'hb_interior_manual_unmatched'
+
+
+def _remove_interior_part(part):
+    """Delete one interior part, its boolean cutters, and any data left
+    without users."""
+    # A boolean operand has to be an object, so a part's cutters hang off
+    # the PART rather than off the opening and a walk of the opening's
+    # children never sees them. Take them with their host: removing the
+    # host alone leaves them behind as loose wire objects that nothing
+    # ever collects.
+    for sub in list(part.children):
+        if sub.get('hb_part_role') != PART_ROLE_DRAWER_BOX_CUTTER:
+            continue
+        sub_data = sub.data
+        bpy.data.objects.remove(sub, do_unlink=True)
+        if isinstance(sub_data, bpy.types.Mesh) and sub_data.users == 0:
+            bpy.data.meshes.remove(sub_data)
+    data = part.data
+    bpy.data.objects.remove(part, do_unlink=True)
+    # Orphaned data (per-part meshes like shelf nosings, accessory font
+    # curves) would otherwise pile up until the next save. Shared data
+    # keeps users and is skipped.
+    if data is not None and data.users == 0:
+        if isinstance(data, bpy.types.Mesh):
+            bpy.data.meshes.remove(data)
+        elif isinstance(data, bpy.types.Curve):
+            bpy.data.curves.remove(data)
+
+
+def _snapshot_interior_cutouts(opening_obj):
+    """{(role, build index): [(modifier name, state), ...]} for every
+    interior part under ``opening_obj`` carrying user cutouts. Manual
+    parts survive the rebuild with their cutouts on them, so they are
+    left out."""
+    kept = {}
+    for child in opening_obj.children:
+        role = child.get('hb_part_role')
+        if (role not in INTERIOR_PART_ROLES or child.type != 'MESH'
+                or INTERIOR_BUILD_INDEX not in child
+                or child.get('IS_MANUAL_PART')):
+            continue
+        try:
+            thickness = float(GeoNodeCutpart(child).get_input('Thickness'))
+        except Exception:
+            continue
+        cuts = []
+        for mod in child.modifiers:
+            if not (mod.type == 'NODES' and mod.node_group
+                    and mod.node_group.name == _USER_CUTOUT_TOKEN
+                    and mod.name.split('.')[0] == _USER_CUTOUT_NAME):
+                continue
+            cpm = CabinetPartModifier(child)
+            cpm.mod = mod
+            try:
+                depth = float(cpm.get_input('Route Depth'))
+                cuts.append((mod.name, {
+                    'x': float(cpm.get_input('X')),
+                    'end_x': float(cpm.get_input('End X')),
+                    'y': float(cpm.get_input('Y')),
+                    'end_y': float(cpm.get_input('End Y')),
+                    'depth': depth,
+                    'through': depth >= thickness - inch(0.001),
+                    'flip_z': bool(cpm.get_input('Flip Z')),
+                }))
+            except Exception:
+                continue
+        if cuts:
+            kept[(role, int(child[INTERIOR_BUILD_INDEX]))] = cuts
+    return kept
+
+
+def _tag_interior_build_order(opening_obj, seen, counters):
+    """Stamp INTERIOR_BUILD_INDEX on the interior parts built since
+    ``seen`` (child names already accounted for), numbering per role in
+    build order. Returns the parts stamped."""
+    new = sorted((c for c in opening_obj.children if c.name not in seen),
+                 key=lambda c: c.name)
+    tagged = []
+    for child in new:
+        seen.add(child.name)
+        role = child.get('hb_part_role')
+        if role not in INTERIOR_PART_ROLES:
+            continue
+        idx = counters.get(role, 0)
+        counters[role] = idx + 1
+        child[INTERIOR_BUILD_INDEX] = idx
+        tagged.append(child)
+    return tagged
+
+
+def _restore_interior_cutouts(opening_obj, kept):
+    """Re-add the cutouts _snapshot_interior_cutouts read, clamped to the
+    rebuilt part's face; a through cut stays through if the thickness
+    changed."""
+    if not kept:
+        return
+    for child in opening_obj.children:
+        cuts = kept.get((child.get('hb_part_role'),
+                         child.get(INTERIOR_BUILD_INDEX)))
+        if not cuts or child.type != 'MESH' or child.get('IS_MANUAL_PART'):
+            continue
+        part = GeoNodeCutpart(child)
+        try:
+            length = float(part.get_input('Length'))
+            width = float(part.get_input('Width'))
+            thickness = float(part.get_input('Thickness'))
+        except Exception:
+            continue
+        for name, st in cuts:
+            cl = min(max(st['end_x'] - st['x'], 0.0), length)
+            cw = min(max(st['end_y'] - st['y'], 0.0), width)
+            if cl <= 0.0 or cw <= 0.0:
+                continue
+            x0 = min(max(st['x'], 0.0), length - cl)
+            y0 = min(max(st['y'], 0.0), width - cw)
+            cpm = part.add_part_modifier(_USER_CUTOUT_TOKEN, name)
+            cpm.set_input('X', x0)
+            cpm.set_input('End X', x0 + cl)
+            cpm.set_input('Y', y0)
+            cpm.set_input('End Y', y0 + cw)
+            cpm.set_input('Route Depth', thickness if st['through']
+                          else min(st['depth'], thickness))
+            cpm.set_input('Flip Z', st['flip_z'])
+            cpm.mod.show_viewport = True
+            cpm.mod.show_render = True
 
 # Maps a Face_Frame_Interior_Item.kind to the *primary* part role its
 # descriptors carry. Multi-part assemblies (PULLOUT_SHELF, ROLLOUT,
@@ -2533,8 +2732,20 @@ class FaceFrameCabinet(GeoNodeCage):
         is_h = (sp.axis == 'H')
         parent_dim = parent_ff_height if is_h else parent_ff_width
         n_splitters = len(children) - 1
-        splitter_total = sum(self._splitter_widths_for(
-            sp, children, n_splitters, bay_props, is_bay_root))
+        widths = self._splitter_widths_for(
+            sp, children, n_splitters, bay_props, is_bay_root)
+        # A removed mid rail's width goes to the two openings it separated,
+        # half each - the same rule the solver builds by.
+        bonuses = [0.0] * len(children)
+        if is_h:
+            ov = sp.splitter_widths
+            widths, bonuses = solver.removed_rail_allowance(
+                widths,
+                [i < len(ov) and ov[i].remove_member
+                 for i in range(n_splitters)],
+                [self._read_node_size(c)[1] for c in children],
+            )
+        splitter_total = sum(widths)
 
         locked_total = 0.0
         unlocked = []
@@ -2562,7 +2773,8 @@ class FaceFrameCabinet(GeoNodeCage):
             for c in unlocked:
                 extra = (solver.VANITY_DOOR_EXTRA_WIDTH
                          if c.get('SIZE_ROLE') == 'VANITY_DOOR' else 0.0)
-                self._write_node_size(c, share + extra)
+                self._write_node_size(
+                    c, share + extra + bonuses[children.index(c)])
         finally:
             _DISTRIBUTING_WIDTHS.discard(id(self.obj))
 
@@ -7668,9 +7880,10 @@ class FaceFrameCabinet(GeoNodeCage):
     def _chase_fit_box(self, parent_obj, op_props, op_x, op_y,
                        box_dx, box_dy, rear_clr):
         """Resolve a box (drawer or rollout) against the cabinet's pipe
-        chase. Returns ``(box_dy, notch_width)``: the depth to build at
-        and, for the NOTCH fit, the overlap width to boolean out
-        (None when the box doesn't meet the chase).
+        chase. Returns ``(box_dy, notch_width, notch_depth)``: the depth
+        to build at and, for the NOTCH fit, the overlap width to boolean
+        out and how far the box rear runs past the chase covers' interior
+        face (both None when the box isn't notched).
 
         The opening's ``chase_fit`` decides: SHORTEN (default) clamps the
         depth so the box and its slide clear the chase covers by the
@@ -7682,16 +7895,16 @@ class FaceFrameCabinet(GeoNodeCage):
         """
         cab = self.obj.face_frame_cabinet
         if not (getattr(cab, 'chase_enabled', False) and self._has_carcass()):
-            return box_dy, None
+            return box_dy, None, None
         span = self._chase_extents(cab)
         if span is None:
-            return box_dy, None
+            return box_dy, None, None
         px, py, _pz = self._cabinet_local_offset(parent_obj)
         bx0 = px + op_x
         bx1 = bx0 + box_dx
         x_lo, x_hi = span
         if bx1 <= x_lo or bx0 >= x_hi:
-            return box_dy, None
+            return box_dy, None, None
         fit = (getattr(op_props, 'chase_fit', 'SHORTEN')
                if op_props is not None else 'SHORTEN')
         chase_depth = min(cab.chase_depth, cab.depth)
@@ -7699,12 +7912,12 @@ class FaceFrameCabinet(GeoNodeCage):
         # face sits at -chase_depth (back plane = 0).
         intrusion = py + op_y + box_dy + chase_depth
         if intrusion <= 0.0:
-            return box_dy, None
+            return box_dy, None, None
         if fit == 'SHORTEN':
-            return box_dy - (intrusion + rear_clr), None
+            return box_dy - (intrusion + rear_clr), None, None
         if fit == 'NOTCH':
-            return box_dy, min(bx1, x_hi) - max(bx0, x_lo)
-        return box_dy, None
+            return box_dy, min(bx1, x_hi) - max(bx0, x_lo), intrusion
+        return box_dy, None, None
 
     def _apply_pipe_chase(self, layout):
         """Notch the chosen back corner (or the back middle) full height
@@ -11445,7 +11658,7 @@ class FaceFrameCabinet(GeoNodeCage):
             op.set_input('Dim Y', cage_dim_y)
             op.set_input('Dim Z', rect['cage_dim_z'])
             op.set_input('Mirror Y', False)
-            self._update_fronts_in_opening(cage, layout, rect)
+            self._update_fronts_in_opening(cage, layout, rect, bay_index)
             self._update_interior_items_in_opening(cage, layout, rect)
             self._update_appliance_in_opening(cage, rect,
                                               appliance_zs=appliance_zs)
@@ -11655,7 +11868,8 @@ class FaceFrameCabinet(GeoNodeCage):
         else:
             appliance_geo.remove_opening_appliance(opening_obj)
 
-    def _update_fronts_in_opening(self, opening_obj, layout, rect):
+    def _update_fronts_in_opening(self, opening_obj, layout, rect,
+                                  bay_index=None):
         """Reconcile front parts under an opening cage.
 
         Structure: opening cage -> front pivot empty -> front part.
@@ -11777,26 +11991,47 @@ class FaceFrameCabinet(GeoNodeCage):
             if drawer_look:
                 self._build_drawer_look_fronts(front, leaf, op_props)
 
-        # Sink apron: a fixed face-frame-depth panel across the top of a
-        # DOOR opening (apron / farmhouse sink). The door(s) stay full
-        # height; the apron sits behind them in the face-frame band
-        # (y from the FF front face back by fft). Built directly here -
-        # not via the leaf/pivot path - so it carries no door style or
-        # pull; PART_ROLE_APRON is in FRONT_PART_ROLES so it's wiped on
-        # the next rebuild. Same orientation as a front part (Length ->
-        # vertical, Width -> horizontal, Thickness -> depth).
+        # Sink apron: a 1/2" panel across the top of a DOOR opening
+        # (apron / farmhouse sink), set 1/8" behind the face frame. The
+        # door(s) stay full height; the apron sits behind them. Built
+        # directly here - not via the leaf/pivot path - so it carries no
+        # door style or pull; PART_ROLE_APRON is in FRONT_PART_ROLES so
+        # it's wiped on the next rebuild. Same orientation as a front part
+        # (Length -> vertical, Width -> horizontal, Thickness -> depth).
         if op_props.add_apron and front_type == 'DOOR':
             # Full interior width (the whole opening cage, x from 0), and
             # set BEHIND the face frame: the FF back plane is bay-local
             # y = 0, and a front part's Thickness extends -Y from its
-            # origin, so an origin at y = +fft puts the apron body in
-            # y[0, fft] - just behind the frame, in the interior.
+            # origin, so an origin at y = setback + t puts the apron body
+            # in y[setback, setback + t] - in the interior.
             full_w = rect['cage_dim_x']
+            apron_t = inch(0.5)
+            apron_setback = inch(0.125)
             top_z = rect['cage_dim_z'] - rect['reveal_top']
-            apron_h = min(op_props.apron_height,
-                          top_z - rect['reveal_bottom'])
+            bottom_z = top_z - op_props.apron_height
+            if bay_index is not None:
+                # Apron Height is measured down from the top of the
+                # front construction, not the panel's own height: an
+                # opening that reaches the top stretcher gets a panel
+                # hung directly under it, shorter by its thickness.
+                # Opening-local Z (the cage sits at cage_z in its bay).
+                bay_top = solver.bay_cage_dims(layout, bay_index)[2]
+                if (rect['cage_z'] + rect['cage_dim_z']
+                        >= bay_top - inch(1.0 / 16.0)):
+                    cage_bottom = (
+                        solver.bay_bottom_z(layout, bay_index)
+                        + solver.effective_bottom_rail_width(layout,
+                                                             bay_index))
+                    front_top = (solver.carcass_top_z(layout, bay_index)
+                                 - solver.front_drop(layout, bay_index)
+                                 - cage_bottom - rect['cage_z'])
+                    top_t = (layout.stretcher_t if layout.uses_stretchers
+                             else layout.mt)
+                    top_z = front_top - top_t
+                    bottom_z = front_top - op_props.apron_height
+            bottom_z = max(bottom_z, rect['reveal_bottom'])
+            apron_h = top_z - bottom_z
             if full_w > 0.0 and apron_h > 0.0:
-                fft = cab_props.face_frame_thickness
                 apron = CabinetPart()
                 apron.create('Apron')
                 apron.obj.parent = opening_obj
@@ -11809,10 +12044,10 @@ class FaceFrameCabinet(GeoNodeCage):
                 apron.obj.rotation_euler.y = math.radians(-90)
                 apron.obj.rotation_euler.z = math.radians(90)
                 apron.set_input('Mirror Y', True)
-                apron.obj.location = (0.0, fft, top_z - apron_h)
+                apron.obj.location = (0.0, apron_setback + apron_t, bottom_z)
                 apron.set_input('Length', apron_h)
                 apron.set_input('Width', full_w)
-                apron.set_input('Thickness', fft)
+                apron.set_input('Thickness', apron_t)
 
         # APPLIANCE openings: filler stiles at the left/right inboard edges so
         # the clear opening matches the appliance width. Built directly here
@@ -12847,13 +13082,7 @@ class FaceFrameCabinet(GeoNodeCage):
         bottom_clr = scene_props.drawer_box_bottom_clearance
 
         cage_x = rect['cage_dim_x']
-        cage_y = rect['cage_dim_y']
         cage_z = rect['cage_dim_z']
-        # Working face frame panel: the box runs back into the host
-        # cabinet's cavity, not the panel's own 3/4 reserve.
-        applied_depth = self.obj.get(TAG_APPLIED_BOX_DEPTH)
-        if applied_depth:
-            cage_y = max(cage_y, float(applied_depth))
         rl = rect['reveal_left']
         rr = rect['reveal_right']
         rt = rect['reveal_top']
@@ -12872,7 +13101,7 @@ class FaceFrameCabinet(GeoNodeCage):
         front_back_y = a_y
 
         box_dx = cage_x - rl - rr - 2.0 * side_clr
-        box_dy = (cage_y - rear_clr) - front_back_y
+        box_dy = self._drawer_box_depth(rect, front_back_y, op_props)
         box_dz = cage_z - rt - rb - top_clr - bottom_clr
 
         # Snap to a stock box height. Clearance-derived sizing cuts the
@@ -12886,31 +13115,28 @@ class FaceFrameCabinet(GeoNodeCage):
             if stock_dz is not None:
                 box_dz = min(stock_dz, opening_dz - bottom_clr)
 
-        # A rollout riding above this drawer takes the top of the
-        # opening: the reserve is its height, the gap under it, and the
-        # top clearance the box would have had anyway. Applied before
-        # the explicit overrides so a typed height still wins - the
-        # drafter who types one is answering this question themselves.
-        if op_props is not None and getattr(op_props,
-                                            'rollout_above_drawer', False):
-            reserve = (op_props.rollout_above_height
-                       + op_props.rollout_above_gap + top_clr)
-            box_dz = min(box_dz, cage_z - rt - rb - bottom_clr - reserve)
+        # Rollouts riding above this drawer take the top of the opening
+        # and the box takes a stock height under the lowest one (see
+        # rollout_above_layout). A rollout that would leave no room for
+        # the smallest box is not built, so the drawer always stays.
+        # Applied before the explicit overrides so a typed height still
+        # wins - the drafter who types one is answering this themselves.
+        if op_props is not None:
+            fit = self._rollout_above_fit(op_props, rect)
+            if fit is not None and fit['drawer_dz'] is not None:
+                box_dz = fit['drawer_dz']
 
         # Per-opening size overrides (right-click the box -> Drawer Box
         # Size...). Overridden axes replace the clearance-derived size,
-        # clamped so the box can't exceed the opening hole or run past
-        # the carcass back. Height keeps the bottom-clearance anchor;
-        # depth grows rearward from the front anchor.
+        # clamped so the box can't exceed the opening hole. Height keeps
+        # the bottom-clearance anchor; the depth override is applied in
+        # _drawer_box_depth.
         if op_props is not None:
             if getattr(op_props, 'drawer_box_override_width', False):
                 box_dx = min(op_props.drawer_box_width, cage_x - rl - rr)
             if getattr(op_props, 'drawer_box_override_height', False):
                 box_dz = min(op_props.drawer_box_height,
                              cage_z - rt - rb - bottom_clr)
-            if getattr(op_props, 'drawer_box_override_depth', False):
-                box_dy = min(op_props.drawer_box_depth,
-                             cage_y - front_back_y)
         if box_dx <= 0.0 or box_dy <= 0.0 or box_dz <= 0.0:
             return None
 
@@ -12923,7 +13149,7 @@ class FaceFrameCabinet(GeoNodeCage):
 
         # Pipe chase interaction: shorten, notch, or leave the box per
         # the opening's chase_fit (see _chase_fit_box).
-        box_dy, notch_w = self._chase_fit_box(
+        box_dy, notch_w, notch_d = self._chase_fit_box(
             pivot_obj.parent, op_props, op_x, op_y, box_dx, box_dy, rear_clr)
         if box_dy <= 0.0:
             return None
@@ -12955,7 +13181,7 @@ class FaceFrameCabinet(GeoNodeCage):
             box.obj['HB_CHASE_FIT'] = 'NOTCH'
             box.obj['CHASE_NOTCHED'] = True
             box.obj['CHASE_NOTCH_WIDTH'] = notch_w
-            box.obj['CHASE_NOTCH_DEPTH'] = intrusion
+            box.obj['CHASE_NOTCH_DEPTH'] = notch_d
         return box
 
     @staticmethod
@@ -13087,10 +13313,11 @@ class FaceFrameCabinet(GeoNodeCage):
 
     def _update_interior_items_in_opening(self, opening_obj, layout, rect):
         """Rebuild the opening's interior parts (shelves, accessory
-        labels, ...). Same wipe-and-recreate strategy as fronts:
-        interior parts hold no user state worth preserving across
-        recalcs - their geometry is fully derived from the InteriorItem
-        collection on the opening props.
+        labels, ...). Same wipe-and-recreate strategy as fronts: a
+        parametric interior part's geometry is fully derived from the
+        InteriorItem collection on the opening props. The user state
+        on them - cutouts, and parts made editable - is carried by
+        build slot (role, INTERIOR_BUILD_INDEX).
 
         Panel roots (face-frame only) never have interior parts; we
         still run the wipe to clean up anything stale, then clear the
@@ -13098,35 +13325,26 @@ class FaceFrameCabinet(GeoNodeCage):
         """
         op_props = opening_obj.face_frame_opening
 
+        # User cutouts live on the parts about to be wiped; carry them
+        # over to the rebuilt parts (restored after the spawn loop).
+        kept_cutouts = _snapshot_interior_cutouts(opening_obj)
+
         # Wipe existing interior children. Match either by role tag or
         # by the explicit ACCESSORY marker we set on text objects, since
         # text-data objects can't carry the same custom prop conventions
-        # quite as cleanly as mesh parts.
+        # quite as cleanly as mesh parts. Manual (Make Editable) parts
+        # are kept, keyed by the build slot they took over.
+        manual = {}
         for child in list(opening_obj.children):
-            if child.get('hb_part_role') in INTERIOR_PART_ROLES:
-                # A boolean operand has to be an object, so a part's
-                # cutters hang off the PART rather than off the opening
-                # and this loop never sees them. Take them with their
-                # host: removing the host alone leaves them behind as
-                # loose wire objects that nothing ever collects.
-                for sub in list(child.children):
-                    if sub.get('hb_part_role') != PART_ROLE_DRAWER_BOX_CUTTER:
-                        continue
-                    sub_data = sub.data
-                    bpy.data.objects.remove(sub, do_unlink=True)
-                    if (isinstance(sub_data, bpy.types.Mesh)
-                            and sub_data.users == 0):
-                        bpy.data.meshes.remove(sub_data)
-                data = child.data
-                bpy.data.objects.remove(child, do_unlink=True)
-                # Orphaned data (per-part meshes like shelf nosings,
-                # accessory font curves) would otherwise pile up until
-                # the next save. Shared data keeps users and is skipped.
-                if data is not None and data.users == 0:
-                    if isinstance(data, bpy.types.Mesh):
-                        bpy.data.meshes.remove(data)
-                    elif isinstance(data, bpy.types.Curve):
-                        bpy.data.curves.remove(data)
+            role = child.get('hb_part_role')
+            if role not in INTERIOR_PART_ROLES:
+                continue
+            if child.get('IS_MANUAL_PART'):
+                if INTERIOR_BUILD_INDEX in child:
+                    key = (role, int(child[INTERIOR_BUILD_INDEX]))
+                    manual.setdefault(key, []).append(child)
+                continue
+            _remove_interior_part(child)
 
         if not self._has_carcass():
             if len(op_props.interior_items) > 0:
@@ -13190,13 +13408,16 @@ class FaceFrameCabinet(GeoNodeCage):
         # interior item - it just belongs to the cabinet rather than to
         # the user, so it is kept in step here and taken away again when
         # the option goes off.
-        self._reconcile_rollout_above_drawer(opening_obj, rect)
+        self._reconcile_rollout_above_drawer(opening_obj, layout, rect)
 
         # Floating-shelf PRODUCTS dropped into this opening (library
         # placement with the cursor over the opening) auto-fit its span
         # like the adjustable shelves spawned below.
         self._fit_opening_floating_shelves(opening_obj, rect)
 
+        seen = {c.name for c in opening_obj.children}
+        built = {}
+        matched = set()
         for desc in solver.interior_descriptors_for_opening(
             opening_obj, layout, rect, self.obj.face_frame_cabinet,
         ):
@@ -13231,23 +13452,138 @@ class FaceFrameCabinet(GeoNodeCage):
                 # TRAY_DIVIDER, TRAY_LOCKED_SHELF, VANITY_SHELF,
                 # VANITY_SUPPORT.
                 self._create_interior_mesh_part(opening_obj, desc)
+            for part in _tag_interior_build_order(opening_obj, seen, built):
+                key = (part.get('hb_part_role'), part[INTERIOR_BUILD_INDEX])
+                if key not in manual:
+                    continue
+                # The hand-edited part stands in for this one. Its name
+                # leaves 'seen' with it, or a later part that happens to
+                # be given the freed name would go untagged.
+                matched.add(key)
+                seen.discard(part.name)
+                _remove_interior_part(part)
+
+        for key, parts in manual.items():
+            for part in parts:
+                if key in matched:
+                    if INTERIOR_MANUAL_UNMATCHED in part:
+                        del part[INTERIOR_MANUAL_UNMATCHED]
+                else:
+                    part[INTERIOR_MANUAL_UNMATCHED] = True
+
+        _restore_interior_cutouts(opening_obj, kept_cutouts)
 
     # Marks the ROLLOUT interior item this cabinet owns, so it can be
     # told apart from one the user added and taken away again when the
     # option goes off.
     ROLLOUT_ABOVE_MARK = 'managed_rollout_above'
 
-    def _reconcile_rollout_above_drawer(self, opening_obj, rect):
-        """Keep the rollout that rides above a drawer in step with the
-        opening's option.
+    # What the last recalc could build, stamped on the opening cage for
+    # the Rollout Above Drawer dialog: how many rollouts fit, the drawer
+    # box height under them, and whether a picked box height fit.
+    TAG_ROLLOUT_ABOVE_BUILT = 'hb_rollout_above_built'
+    TAG_ROLLOUT_ABOVE_DRAWER_DZ = 'hb_rollout_above_drawer_height'
+    TAG_ROLLOUT_ABOVE_PICK_FITS = 'hb_rollout_above_pick_fits'
 
-        It is a normal ROLLOUT interior item - same box, same slides,
-        same spacer ladders - so everything downstream (the cutlist, the
-        drawings, the open/close command) treats it as the rollout it
-        is. The only difference is that the cabinet owns it: its height
-        comes from the opening's rollout_above_height and it sits at the
-        top of the opening, with the drawer box below shortened to suit
-        (see _create_drawer_box_for_front).
+    def _drawer_box_depth(self, rect, front_back_y, op_props):
+        """Depth of the drawer box behind a drawer / pullout front: from
+        the back of the front to the cavity back less the rear
+        clearance, or the opening's typed depth. A rollout riding above
+        the drawer takes the same depth."""
+        rear_clr = bpy.context.scene.hb_face_frame.drawer_box_rear_clearance
+        cage_y = rect['cage_dim_y']
+        # Working face frame panel: the box runs back into the host
+        # cabinet's cavity, not the panel's own 3/4 reserve.
+        applied_depth = self.obj.get(TAG_APPLIED_BOX_DEPTH)
+        if applied_depth:
+            cage_y = max(cage_y, float(applied_depth))
+        if (op_props is not None
+                and getattr(op_props, 'drawer_box_override_depth', False)):
+            return min(op_props.drawer_box_depth, cage_y - front_back_y)
+        return (cage_y - rear_clr) - front_back_y
+
+    def _rollout_above_fit(self, op_props, rect, migrate=True):
+        """rollout_above_layout for this opening, or None when it is not
+        a drawer opening or carries no rollouts above its drawer."""
+        if migrate:
+            self._migrate_rollout_above(op_props, rect)
+        if (op_props.front_type not in DRAWER_BOX_FRONT_TYPES
+                or len(op_props.rollouts_above) == 0):
+            return None
+        from . import props_hb_face_frame
+        heights = [inch(props_hb_face_frame.rollout_height_inches(
+                        entry.height_preset))
+                   for entry in op_props.rollouts_above]
+        pick_in = props_hb_face_frame.drawer_box_height_inches(
+            op_props.rollout_above_drawer_box_height)
+        scene_props = bpy.context.scene.hb_face_frame
+        return rollout_above_layout(
+            rect['reveal_bottom'],
+            rect['cage_dim_z'] - max(rect['reveal_top'], 0.0),
+            heights,
+            scene_props.drawer_box_bottom_clearance,
+            inch(pick_in) if pick_in is not None else None)
+
+    def _migrate_rollout_above(self, op_props, rect):
+        """Carry the first version's single rollout forward: its free
+        height goes to the nearest standard size, and a gap typed wider
+        than the minimum becomes a smaller standard drawer box that keeps
+        at least that gap. Runs once - the old switch goes off after.
+        Writes re-enter recalc; the _RECALCULATING guard absorbs that."""
+        if not getattr(op_props, 'rollout_above_drawer', False):
+            return
+        from . import props_hb_face_frame
+        if len(op_props.rollouts_above) == 0:
+            entry = op_props.rollouts_above.add()
+            entry.height_preset = (
+                props_hb_face_frame.nearest_rollout_height_preset(
+                    op_props.rollout_above_height))
+            extra_gap = op_props.rollout_above_gap - ROLLOUT_ABOVE_BOX_GAP
+            fit = (self._rollout_above_fit(op_props, rect, migrate=False)
+                   if extra_gap > 1.0e-5 else None)
+            if fit is not None and fit['drawer_dz'] is not None:
+                space = fit['drawer_space'] - extra_gap
+                best_key, best_h = None, 0.0
+                for key, inches in (props_hb_face_frame
+                                    ._DRAWER_BOX_HEIGHTS_IN.items()):
+                    height = inch(inches)
+                    if (best_h < height <= space + 1.0e-5
+                            and height < fit['drawer_dz'] - 1.0e-5):
+                        best_key, best_h = key, height
+                if best_key is not None:
+                    op_props.rollout_above_drawer_box_height = best_key
+        op_props.rollout_above_drawer = False
+
+    def _stamp_rollout_above_fit(self, opening_obj, fit):
+        values = {}
+        if fit is not None:
+            values = {
+                self.TAG_ROLLOUT_ABOVE_BUILT: len(fit['rollouts']),
+                self.TAG_ROLLOUT_ABOVE_DRAWER_DZ: fit['drawer_dz'] or 0.0,
+                self.TAG_ROLLOUT_ABOVE_PICK_FITS: int(fit['pick_fits']),
+            }
+        for key in (self.TAG_ROLLOUT_ABOVE_BUILT,
+                    self.TAG_ROLLOUT_ABOVE_DRAWER_DZ,
+                    self.TAG_ROLLOUT_ABOVE_PICK_FITS):
+            if key in values:
+                if opening_obj.get(key) != values[key]:
+                    opening_obj[key] = values[key]
+            elif key in opening_obj:
+                del opening_obj[key]
+
+    def _reconcile_rollout_above_drawer(self, opening_obj, layout, rect):
+        """Keep the rollouts that ride above a drawer in step with the
+        opening's rollouts_above list.
+
+        They are one normal ROLLOUT interior item - same boxes, same
+        slides, same spacer ladders - so everything downstream (the
+        cutlist, the drawings, the open/close command, the rollout's own
+        right-click menu) treats them as the rollouts they are. The only
+        difference is that the cabinet owns the item: its boxes, gaps
+        and position come from rollout_above_layout, hung from the top of
+        the opening a box gap apart, and it sits front to back exactly
+        like the drawer box under it. Rollouts that don't fit are left
+        out of the item.
 
         Writes here re-enter recalc; the _RECALCULATING guard absorbs
         that, the same way the rollout-box migration above does.
@@ -13255,51 +13591,55 @@ class FaceFrameCabinet(GeoNodeCage):
         op_props = getattr(opening_obj, 'face_frame_opening', None)
         if op_props is None:
             return
-        wants = (getattr(op_props, 'rollout_above_drawer', False)
-                 and op_props.front_type in ('DRAWER_FRONT', 'PULLOUT'))
+        fit = self._rollout_above_fit(op_props, rect)
+        placed = fit['rollouts'] if fit is not None else []
+        self._stamp_rollout_above_fit(opening_obj, fit)
 
-        managed = [item for item in op_props.interior_items
+        managed = [index for index, item in enumerate(op_props.interior_items)
                    if item.get(self.ROLLOUT_ABOVE_MARK)]
-        if not wants:
-            for item in managed:
-                index = list(op_props.interior_items).index(item)
+        if not placed:
+            for index in reversed(managed):
                 op_props.interior_items.remove(index)
             return
 
         if managed:
-            item = managed[0]
             # More than one can only come from a duplicate; keep the first.
-            for extra in managed[1:]:
-                op_props.interior_items.remove(
-                    list(op_props.interior_items).index(extra))
+            for index in reversed(managed[1:]):
+                op_props.interior_items.remove(index)
+            item = op_props.interior_items[managed[0]]
         else:
             item = op_props.interior_items.add()
             item[self.ROLLOUT_ABOVE_MARK] = True
             item.kind = 'ROLLOUT'
             item.qty = 1
 
-        cage_z = rect['cage_dim_z']
-        height = op_props.rollout_above_height
-        scene_props = bpy.context.scene.hb_face_frame
-        top_clr = scene_props.drawer_box_top_clearance
-        # The rollout hangs at the top of the opening; the drawer box
-        # takes what is left under it.
-        bottom_gap = max(cage_z - top_clr - height, 0.0)
+        def _set(owner, name, value):
+            if abs(getattr(owner, name) - value) > 1e-6:
+                setattr(owner, name, value)
 
         if item.kind != 'ROLLOUT':
             item.kind = 'ROLLOUT'
-        if item.qty != 1:
-            item.qty = 1
-        if len(item.rollout_boxes) != 1:
+        # The item stacks its boxes bottom to top.
+        heights = [height for _bottom, height in reversed(placed)]
+        if len(item.rollout_boxes) != len(heights):
             item.rollout_boxes.clear()
-            item.rollout_boxes.add()
-        box = item.rollout_boxes[0]
-        if box.height_preset != 'CUSTOM':
-            box.height_preset = 'CUSTOM'
-        if abs(box.height - height) > 1e-6:
-            box.height = height
-        if abs(item.bottom_gap - bottom_gap) > 1e-6:
-            item.bottom_gap = bottom_gap
+            for _ in heights:
+                item.rollout_boxes.add()
+        from . import props_hb_face_frame
+        for box, height in zip(item.rollout_boxes, heights):
+            preset = props_hb_face_frame.rollout_height_preset_for(height)
+            if box.height_preset != preset:
+                box.height_preset = preset
+            _set(box, 'height', height)
+        _set(item, 'distance_between', ROLLOUT_ABOVE_BOX_GAP)
+        _set(item, 'bottom_gap', placed[-1][0])
+        # Front to back like the drawer box: no setback, starting at the
+        # back of the drawer front and running the drawer box's depth.
+        front_back_y = solver.slide_front_back_y(
+            layout, self.obj.face_frame_cabinet)
+        _set(item, 'item_setback', front_back_y)
+        _set(item, 'rollout_depth',
+             max(self._drawer_box_depth(rect, front_back_y, op_props), 0.0))
 
     def _fit_opening_floating_shelves(self, opening_obj, rect):
         """Auto-fit floating-shelf PRODUCTS parented into this opening.
@@ -13814,7 +14154,7 @@ class FaceFrameCabinet(GeoNodeCage):
             rear_clr = bpy.context.scene.hb_face_frame.drawer_box_rear_clearance
         except AttributeError:
             rear_clr = 0.0
-        dy, notch_w = self._chase_fit_box(
+        dy, notch_w, notch_d = self._chase_fit_box(
             opening_obj, op_props, desc['position'][0], desc['position'][1],
             dx, dy, rear_clr)
         if dy <= 0.0:
@@ -13831,6 +14171,7 @@ class FaceFrameCabinet(GeoNodeCage):
             box.obj['HB_CHASE_FIT'] = 'NOTCH'
             box.obj['CHASE_NOTCHED'] = True
             box.obj['CHASE_NOTCH_WIDTH'] = notch_w
+            box.obj['CHASE_NOTCH_DEPTH'] = notch_d
         # Per-box U-notch (the rollout equivalent of the sink duo drawer).
         # The indices are stamped so the right-click command can walk back
         # from this object to the rollout_boxes entry that owns it.
@@ -15466,6 +15807,9 @@ class FloatingShelfFaceFrameCabinet(FaceFrameCabinet):
         self.set_input('Dim Y', depth)
         self.set_input('Dim Z', thickness)
 
+        # The front board and finished end panels are fixed 3/4" stock;
+        # material_thickness sets only the top and bottom panels.
+        ft = inch(0.75)
         mt = shelf.material_thickness
         fl = shelf.finish_left
         fr = shelf.finish_right
@@ -15493,22 +15837,22 @@ class FloatingShelfFaceFrameCabinet(FaceFrameCabinet):
             for k, v in mirror.items():
                 gn.set_input(k, v)
 
-        inset_l = mt if fl else 0.0
-        inset_r = mt if fr else 0.0
+        inset_l = ft if fl else 0.0
+        inset_r = ft if fr else 0.0
         inner_len = width - inset_l - inset_r
-        inner_depth = depth - mt
+        inner_depth = depth - ft
 
         # Front board: full width, stands `thickness` tall at the front.
-        place(FRONT, width, thickness, mt, (0.0, -depth, 0.0),
+        place(FRONT, width, thickness, ft, (0.0, -depth, 0.0),
               (math.radians(-90), 0.0, 0.0), {'Mirror Y': True})
         FRONT['IS_FINISHED'] = True
 
         # Top + bottom: horizontal panels between the end panels, behind
         # the front board, spanning the remaining depth.
-        place(TOP, inner_len, inner_depth, mt, (inset_l, -depth + mt, thickness),
+        place(TOP, inner_len, inner_depth, mt, (inset_l, -depth + ft, thickness),
               (0.0, 0.0, 0.0), {'Mirror Z': True})
         TOP['IS_FINISHED'] = True
-        place(BOTTOM, inner_len, inner_depth, mt, (inset_l, -depth + mt, 0.0),
+        place(BOTTOM, inner_len, inner_depth, mt, (inset_l, -depth + ft, 0.0),
               (0.0, 0.0, 0.0), {})
         BOTTOM['IS_FINISHED'] = True
 
@@ -15516,7 +15860,7 @@ class FloatingShelfFaceFrameCabinet(FaceFrameCabinet):
         # runs the full depth and miters into the front board at 45
         # through the corner (the shop's construction) instead of
         # butting behind it.
-        place(LP, depth if fl else inner_depth, thickness, mt,
+        place(LP, depth if fl else inner_depth, thickness, ft,
               (0.0, 0.0, 0.0),
               (math.radians(-90), 0.0, math.radians(90)),
               {'Mirror X': True, 'Mirror Y': True, 'Mirror Z': True})
@@ -15525,7 +15869,7 @@ class FloatingShelfFaceFrameCabinet(FaceFrameCabinet):
             LP.hide_render = not fl
         LP['IS_FINISHED'] = True
 
-        place(RP, depth if fr else inner_depth, thickness, mt,
+        place(RP, depth if fr else inner_depth, thickness, ft,
               (width, 0.0, 0.0),
               (math.radians(-90), 0.0, math.radians(90)),
               {'Mirror X': True, 'Mirror Y': True})
@@ -15535,9 +15879,9 @@ class FloatingShelfFaceFrameCabinet(FaceFrameCabinet):
         RP['IS_FINISHED'] = True
 
         self._apply_box_end_miter('LEFT', fl, FRONT, LP,
-                                  width, depth, mt, thickness)
+                                  width, depth, ft, thickness)
         self._apply_box_end_miter('RIGHT', fr, FRONT, RP,
-                                  width, depth, mt, thickness)
+                                  width, depth, ft, thickness)
 
         # --- Light groove (Heavy Duty shelves only) ---
         # A routed LED channel on the top and/or bottom face, set a
