@@ -103,6 +103,24 @@ def load_file_post(scene):
     except Exception:
         pass
 
+    # A new, never-saved file starts with the Show Model switch the user
+    # last chose; a saved file keeps the switch it was saved with.
+    if not bpy.data.filepath:
+        _apply_new_file_appliance_models()
+
+
+def _apply_new_file_appliance_models():
+    try:
+        prefs = bpy.context.preferences.addons[__package__].preferences
+    except (KeyError, AttributeError):
+        return
+    show = bool(prefs.show_appliance_models)
+    for scene in bpy.data.scenes:
+        hb = getattr(scene, 'home_builder', None)
+        if hb is not None and hb.show_appliance_models != show:
+            # Stored directly: the update would re-save the preference.
+            hb['show_appliance_models'] = show
+
 
 def _update_use_viewport_hud(self, context):
     """Flipping the HUD preference: redraw every 3D viewport so the change
@@ -175,6 +193,15 @@ class Home_Builder_AddonPreferences(bpy.types.AddonPreferences):
                     "while the marks are still unfamiliar",
         default=False,
         update=_update_use_viewport_hud,
+    ) # type: ignore
+
+    # Not drawn: remembers the library panel's Show Model switch, which
+    # sets it, so a new drawing starts the way the user last left it.
+    show_appliance_models: bpy.props.BoolProperty(
+        name="Show Appliance Models",
+        description="Whether new drawings start with the 3D models on "
+                    "their appliances showing",
+        default=True,
     ) # type: ignore
 
     hide_2d_drawing_panels: bpy.props.BoolProperty(
@@ -325,7 +352,7 @@ class Home_Builder_AddonPreferences(bpy.types.AddonPreferences):
         sub = col.column(align=True)
         sub.enabled = self.use_room_palette
         sub.prop(self, "palette_expanded")
-        
+
         # Layout view defaults
         box = layout.box()
         box.label(text="Layout View Defaults", icon='RENDERLAYERS')

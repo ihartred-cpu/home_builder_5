@@ -404,6 +404,16 @@ PART_ROLE_TILT_OUT = 'TILT_OUT'
 PART_ROLE_ADA_CUTTER = 'ADA_CUTTER'
 ADA_CUT_MOD_NAME = 'Knee Clearance'
 ADA_SINK_TAG = 'IS_ADA_SINK'
+# Accessible sink fronts: the band across the front and the panel that
+# closes the rake. Each builds as a slab or as stiles and rails around
+# a panel (Face_Frame_Cabinet_Props.ada_front_construction /
+# ada_angled_front_construction).
+PART_ROLE_ADA_FRONT = 'ADA_FRONT'
+PART_ROLE_ADA_ANGLED_FRONT = 'ADA_ANGLED_FRONT'
+# The slab closing the band's flat underside between the two fronts.
+PART_ROLE_ADA_BOTTOM = 'ADA_BOTTOM'
+ADA_FRONT_PART_ROLES = (PART_ROLE_ADA_FRONT, PART_ROLE_ADA_ANGLED_FRONT,
+                        PART_ROLE_ADA_BOTTOM)
 PART_ROLE_APRON = 'APRON'
 # Drawer-look door: a working DOOR leaf wearing N applied drawer-front
 # panels (proud of the leaf, with reveal gaps that read as faux mid
@@ -914,6 +924,47 @@ def stock_drawer_box_height(opening_height):
     for min_opening_in, box_in in STOCK_DRAWER_BOX_HEIGHTS:
         if opening_in >= min_opening_in - 1.0e-4:
             return inch(box_in)
+    return None
+
+
+# Blum TANDEM BLUMOTION sizing (scene drawer_box_sizing 'BLUM_TANDEM'):
+# the slide sets the clearances - 3/16 each side, 9/16 under the box, at
+# least 5/16 over it (the stock height table above already leaves the
+# 7/8 total) and at least 15/16 behind it - and the box is as deep as
+# its runner. Past 2-9/16 behind the box the runner's rear socket may
+# need blocking to land on.
+BLUM_TANDEM_SIDE_CLEARANCE = inch(0.1875)
+BLUM_TANDEM_TOP_CLEARANCE = inch(0.3125)
+BLUM_TANDEM_BOTTOM_CLEARANCE = inch(0.5625)
+BLUM_TANDEM_REAR_CLEARANCE = inch(0.9375)
+BLUM_TANDEM_BLOCKING_REAR_CLEARANCE = inch(2.5625)
+BLUM_TANDEM_RUNNER_LENGTHS_IN = (21.0, 18.0, 15.0, 12.0, 9.0)
+
+
+def uses_blum_tandem_sizing(scene_props):
+    return getattr(scene_props, 'drawer_box_sizing', 'CUSTOM') == 'BLUM_TANDEM'
+
+
+def drawer_box_clearances(scene_props):
+    """(side, top, bottom, rear) drawer box clearances for the scene's
+    sizing mode. Blum TANDEM's are fixed minimums; Custom reads the
+    scene clearance props."""
+    if uses_blum_tandem_sizing(scene_props):
+        return (BLUM_TANDEM_SIDE_CLEARANCE, BLUM_TANDEM_TOP_CLEARANCE,
+                BLUM_TANDEM_BOTTOM_CLEARANCE, BLUM_TANDEM_REAR_CLEARANCE)
+    return (scene_props.drawer_box_side_clearance,
+            scene_props.drawer_box_top_clearance,
+            scene_props.drawer_box_bottom_clearance,
+            scene_props.drawer_box_rear_clearance)
+
+
+def blum_tandem_runner_length(available_depth):
+    """Longest runner (scene units) that fits `available_depth` - the
+    depth left for the box after the minimum rear clearance - or None
+    when even the shortest runner doesn't."""
+    for length_in in BLUM_TANDEM_RUNNER_LENGTHS_IN:
+        if inch(length_in) <= available_depth + 1.0e-5:
+            return inch(length_in)
     return None
 
 
@@ -2567,14 +2618,38 @@ class FaceFrameCabinet(GeoNodeCage):
             [c for c in self.obj.children if c.get(TAG_BAY_CAGE)],
             key=lambda c: c.get('hb_bay_index', 0),
         )
+        panel_rails = None
         for bay_obj in bays:
             bp = bay_obj.face_frame_bay
+            top_target = cab_props.top_rail_width
+            bottom_target = cab_props.bottom_rail_width
+            if bp.panel_bay:
+                if panel_rails is None:
+                    panel_rails = self._panel_bay_rail_widths()
+                top_target, bottom_target = panel_rails
             if not bp.unlock_top_rail:
-                if abs(bp.top_rail_width - cab_props.top_rail_width) > 1e-6:
-                    bp.top_rail_width = cab_props.top_rail_width
+                if abs(bp.top_rail_width - top_target) > 1e-6:
+                    bp.top_rail_width = top_target
             if not bp.unlock_bottom_rail:
-                if abs(bp.bottom_rail_width - cab_props.bottom_rail_width) > 1e-6:
-                    bp.bottom_rail_width = cab_props.bottom_rail_width
+                if abs(bp.bottom_rail_width - bottom_target) > 1e-6:
+                    bp.bottom_rail_width = bottom_target
+
+    def _panel_bay_rail_widths(self):
+        """(top, bottom) rail widths for a panel bay: the frame rail the
+        neighbouring doors overlay, less the overlay, plus the door
+        style's own rail - so the panel's inner edges land where the
+        door panels do. SLAB / no door style keeps the cabinet rails.
+        Same rule as a PANELED finished end (applied_panel_sizing)."""
+        from . import applied_panel_sizing
+        cab_props = self.obj.face_frame_cabinet
+        rail = applied_panel_sizing._door_rail_width(self.obj)
+        if rail <= 0.0:
+            return cab_props.top_rail_width, cab_props.bottom_rail_width
+        return (
+            cab_props.top_rail_width - cab_props.default_top_overlay + rail,
+            cab_props.bottom_rail_width - cab_props.default_bottom_overlay
+            + rail,
+        )
 
     def _distribute_bay_widths(self):
         """Redistribute available width among bays whose unlock_width is False.
@@ -7782,6 +7857,7 @@ class FaceFrameCabinet(GeoNodeCage):
         the side view.
         """
         shape = self._ada_shape(layout) if self._has_carcass() else None
+        self._reconcile_ada_fronts(layout, shape)
         if shape is None:
             self._cleanup_ada_cutter_and_cuts()
             for key in ('ADA_WALL_RUN', 'ADA_RAKE_RUN', 'ADA_RISE',
@@ -7799,6 +7875,190 @@ class FaceFrameCabinet(GeoNodeCage):
         self.obj['ADA_RISE'] = round(rise / one_inch, 3)
         self.obj['ADA_RAKE_LENGTH'] = round(
             math.hypot(rake_run, rise) / one_inch, 3)
+
+    def _reconcile_ada_fronts(self, layout, shape):
+        """Build the accessible sink's fronts, or take them away.
+
+        The FRONT is the band across the top of the box, in the face
+        frame plane; it stands in for the collapsed face frame's top
+        rail, which is hidden while the front is there. The ANGLED
+        FRONT closes the rake between the sides, its face flush with
+        the raked edges and toward the knees; it only exists while the
+        sides are raked. Each is a slab or stiles and rails around a
+        panel, per the cabinet's two construction picks.
+        """
+        cab = self.obj.face_frame_cabinet
+        specs = {}
+        if self.obj.get(ADA_SINK_TAG) and self._has_carcass():
+            fft = cab.face_frame_thickness
+            band = min(cab.ada_side_front_height, layout.dim_z)
+            if band > 0.0 and layout.dim_x > 0.0:
+                # Height up the part's X, width along its -Y, face at
+                # +Z: door_builder's front-cutpart space.
+                basis = Matrix(((0.0, -1.0, 0.0),
+                                (0.0, 0.0, -1.0),
+                                (1.0, 0.0, 0.0)))
+                origin = Vector((0.0, -layout.dim_y + fft,
+                                 layout.dim_z - band))
+                specs[PART_ROLE_ADA_FRONT] = (
+                    'Front', cab.ada_front_construction, basis, origin,
+                    layout.dim_x, band, fft)
+            if shape is not None:
+                wall_run, rake_run, rise, floor_z = shape
+                rake = math.hypot(rake_run, rise)
+                t = cab.door_thickness
+                x_lo = solver.carcass_inner_left_x(layout)
+                width = solver.carcass_inner_right_x(layout) - x_lo
+                if width > 0.0:
+                    up = Vector((0.0, -rake_run / rake, rise / rake))
+                    face = Vector((0.0, -rise / rake, -rake_run / rake))
+                    basis = Matrix(((0.0, -1.0, 0.0),
+                                    (up.y, 0.0, face.y),
+                                    (up.z, 0.0, face.z)))
+                    # Face on the rake line, stock behind it in the box.
+                    origin = (Vector((x_lo, -wall_run, floor_z))
+                              - face * t)
+                    specs[PART_ROLE_ADA_ANGLED_FRONT] = (
+                        'Angled Front', cab.ada_angled_front_construction,
+                        basis, origin, width, rake, t)
+                    # The flat underside of the band, from the top of
+                    # the rake forward to the back of the front: a slab
+                    # facing down, its underside flush with the band's.
+                    run_y = -(wall_run + rake_run)
+                    depth = run_y - (-layout.dim_y + fft)
+                    if depth > 0.0:
+                        basis = Matrix(((0.0, -1.0, 0.0),
+                                        (-1.0, 0.0, 0.0),
+                                        (0.0, 0.0, -1.0)))
+                        origin = Vector((x_lo, run_y, floor_z + rise + t))
+                        specs[PART_ROLE_ADA_BOTTOM] = (
+                            'Front Bottom', 'SLAB', basis, origin, width,
+                            depth, t)
+
+        existing = {}
+        for child in list(self.obj.children):
+            role = child.get('hb_part_role')
+            if role in ADA_FRONT_PART_ROLES:
+                if role in specs and role not in existing:
+                    existing[role] = child
+                else:
+                    mesh = child.data
+                    bpy.data.objects.remove(child, do_unlink=True)
+                    if mesh is not None and mesh.users == 0:
+                        bpy.data.meshes.remove(mesh)
+            elif role == PART_ROLE_TOP_RAIL:
+                hide = PART_ROLE_ADA_FRONT in specs
+                if hide or child.get('hb_ada_hidden'):
+                    child.hide_viewport = hide
+                    child.hide_render = hide
+                    if hide:
+                        child['hb_ada_hidden'] = True
+                    elif 'hb_ada_hidden' in child:
+                        del child['hb_ada_hidden']
+
+        for role, (name, construction, basis, origin, width, height,
+                   thickness) in specs.items():
+            obj = existing.get(role)
+            if obj is None:
+                part = CabinetPart()
+                part.create(name)
+                part.obj.parent = self.obj
+                part.obj['hb_part_role'] = role
+                part.obj['CABINET_PART'] = True
+                part.set_input('Mirror Y', True)
+                obj = part.obj
+            part = CabinetPart(obj)
+            part.set_input('Length', height)
+            part.set_input('Width', width)
+            part.set_input('Thickness', thickness)
+            for mod in obj.modifiers:
+                if mod.type == 'NODES':
+                    mod.show_viewport = False
+                    mod.show_render = False
+            if obj.data.users > 1:
+                obj.data = obj.data.copy()
+            obj.matrix_basis = Matrix.Translation(origin) @ basis.to_4x4()
+            self._build_ada_front_mesh(obj, construction, width, height,
+                                       thickness)
+
+    def _build_ada_front_mesh(self, obj, construction, width, height,
+                              thickness):
+        """Slab, or stiles and rails around a panel from the cabinet's
+        door style (a 2-1/4" square frame with no 5-piece door style).
+        Rails narrow to keep a 1" panel on a short band; a front too
+        small for any frame builds as a slab."""
+        from ..common import door_builder
+        from . import applied_panel_sizing
+        from .props_hb_face_frame import get_style_props
+        one_inch = inch(1.0)
+        style = applied_panel_sizing._resolve_door_style(self.obj)
+        if style is not None and getattr(style, 'door_type', '') != '5_PIECE':
+            style = None
+        kwargs = {}
+        if construction == 'FRAME':
+            info = door_builder.door_style_info(style)
+            if style is None:
+                info.update(stile_width=inch(2.25), rail_width=inch(2.25))
+            info.update(door_type='5_PIECE', add_mid_rail=False,
+                        mid_rail_z=None, mid_rail_count=0,
+                        mid_stile_count=0, left_stile_width=None,
+                        right_stile_width=None, top_rail_width=None,
+                        bottom_rail_width=None)
+            if style is not None:
+                member_sec = style.resolve_member_section(thickness)
+                pkind, p_th, p_inset = style.effective_panel_fields(
+                    thickness)
+                info['panel_thickness'] = p_th
+                info['panel_inset'] = p_inset
+                if member_sec is not None:
+                    mw = max(u for u, v in member_sec)
+                    info.update(stile_width=mw, rail_width=mw)
+                kwargs = style.resolve_mesh_sections(
+                    thickness, p_inset, pkind, member_sec)
+            rail_fit = (height - one_inch) / 2.0
+            if (kwargs.get('member_section') is None
+                    and info['rail_width'] > rail_fit):
+                info['rail_width'] = max(rail_fit, inch(0.5))
+            min_w, min_h = door_builder.layout_min_size(info)
+            if width <= min_w or height <= min_h:
+                info['door_type'] = 'SLAB'
+                kwargs = {}
+        else:
+            info = door_builder.door_style_info(None)
+            info['door_type'] = 'SLAB'
+        finish = grain = None
+        style_name = self.obj.get('STYLE_NAME')
+        if style_name:
+            for cs in get_style_props().cabinet_styles:
+                if cs.name == style_name:
+                    finish, grain = cs.get_finish_material()
+                    break
+        if info['door_type'] == 'SLAB':
+            materials = (grain or finish,) if (grain or finish) else None
+        elif finish is not None:
+            materials = (finish, grain or finish, finish)
+        else:
+            materials = None
+        door_builder.build_door_mesh(obj.data, info, width, height,
+                                     thickness, materials=materials,
+                                     **kwargs)
+        if info['door_type'] == 'SLAB':
+            obj['HB_STATIC_SLAB'] = True
+            if 'HB_DOOR_FRAME' in obj:
+                del obj['HB_DOOR_FRAME']
+        else:
+            obj['HB_DOOR_FRAME'] = {
+                'left_stile': info['stile_width'],
+                'right_stile': info['stile_width'],
+                'top_rail': info['rail_width'],
+                'bottom_rail': info['rail_width'],
+                'add_mid_rail': False,
+                'mid_center': True,
+                'mid_loc': 0.0,
+                'mid_rail_width': info['mid_rail_width'],
+            }
+            if 'HB_STATIC_SLAB' in obj:
+                del obj['HB_STATIC_SLAB']
 
     def _iter_wedge_cut_targets(self):
         """Root cage + carcass parts whose back-bottom corner the wedge
@@ -11556,7 +11816,11 @@ class FaceFrameCabinet(GeoNodeCage):
     def _apply_sink_clearance(self, parts, cutter):
         """Every part carries a boolean DIFFERENCE against the sink's
         clearance cutter, or loses it when there is no sink -- the same
-        lazy-cutter + boolean pattern as the angled cuts."""
+        lazy-cutter + boolean pattern as the angled cuts. The cut is
+        switched off while the appliance shows no model."""
+        from ..common import appliance_geo
+        active = cutter is not None and appliance_geo.clearance_active(
+            cutter.parent)
         for part in parts:
             mod = part.modifiers.get(self.SINK_CLEARANCE_MOD_NAME)
             if cutter is None:
@@ -11569,6 +11833,7 @@ class FaceFrameCabinet(GeoNodeCage):
                 mod.operation = 'DIFFERENCE'
             if mod.object is not cutter:
                 mod.object = cutter
+            appliance_geo.set_clearance_cut(mod, active)
 
     def _update_bay_cage(self, bay_obj, layout, bay_index):
         """Position and size a single bay cage from the solver. Cascades
@@ -11984,7 +12249,8 @@ class FaceFrameCabinet(GeoNodeCage):
             # single-opening builds.
             no_pulls = (self.obj.get('HB_NO_DOOR_PULLS')
                         or self.obj.get('HB_TRIVIEW_DOORS'))
-            if not drawer_look and not no_pulls:
+            # Bi-fold pairs pull from the lead leaf only.
+            if not drawer_look and not no_pulls and not leaf.get('no_pull'):
                 self._create_pull_for_front(front, leaf['role'], leaf,
                                             op_props)
             self._create_drawer_box_for_front(pivot, leaf, rect, op_props)
@@ -13076,10 +13342,9 @@ class FaceFrameCabinet(GeoNodeCage):
         if not scene_props.include_drawer_boxes:
             return None
 
-        side_clr = scene_props.drawer_box_side_clearance
-        top_clr = scene_props.drawer_box_top_clearance
-        rear_clr = scene_props.drawer_box_rear_clearance
-        bottom_clr = scene_props.drawer_box_bottom_clearance
+        side_clr, top_clr, bottom_clr, rear_clr = drawer_box_clearances(
+            scene_props)
+        blum = uses_blum_tandem_sizing(scene_props)
 
         cage_x = rect['cage_dim_x']
         cage_z = rect['cage_dim_z']
@@ -13109,7 +13374,8 @@ class FaceFrameCabinet(GeoNodeCage):
         # most visibly a pullout behind a tall door, drawn as a drawer
         # nearly the height of the door. The box keeps its bottom
         # clearance and the extra room stays above it.
-        if scene_props.use_stock_drawer_box_heights:
+        # Blum TANDEM boxes are always stock heights.
+        if blum or scene_props.use_stock_drawer_box_heights:
             opening_dz = cage_z - rt - rb
             stock_dz = stock_drawer_box_height(opening_dz)
             if stock_dz is not None:
@@ -13165,6 +13431,12 @@ class FaceFrameCabinet(GeoNodeCage):
         box.obj['hb_part_role'] = PART_ROLE_DRAWER_BOX
         box.obj['CABINET_PART'] = True
         box.obj['MENU_ID'] = 'HOME_BUILDER_MT_face_frame_drawer_box_commands'
+        # Largest sizes that still keep the minimum clearances, for the
+        # Drawer Box Size dialog to warn against when a size is typed.
+        box.obj['HB_BOX_MAX_WIDTH'] = cage_x - rl - rr - 2.0 * side_clr
+        box.obj['HB_BOX_MAX_HEIGHT'] = cage_z - rt - rb - top_clr - bottom_clr
+        box.obj['HB_BOX_DEPTH_SPACE'] = self._drawer_box_depth_space(
+            rect, front_back_y)
         self._stamp_drawer_box_construction(box.obj, op_props)
         if op_props is not None:
             self._spawn_drawer_inserts(box.obj, box_dx, box_dy, box_dz,
@@ -13490,17 +13762,30 @@ class FaceFrameCabinet(GeoNodeCage):
         the back of the front to the cavity back less the rear
         clearance, or the opening's typed depth. A rollout riding above
         the drawer takes the same depth."""
-        rear_clr = bpy.context.scene.hb_face_frame.drawer_box_rear_clearance
+        scene_props = bpy.context.scene.hb_face_frame
+        rear_clr = drawer_box_clearances(scene_props)[3]
+        space = self._drawer_box_depth_space(rect, front_back_y)
+        if (op_props is not None
+                and getattr(op_props, 'drawer_box_override_depth', False)):
+            return min(op_props.drawer_box_depth, space)
+        available = space - rear_clr
+        if uses_blum_tandem_sizing(scene_props):
+            # As deep as the longest runner that fits; a cavity too
+            # shallow for the shortest runner keeps the clearance fit.
+            runner = blum_tandem_runner_length(available)
+            if runner is not None:
+                return runner
+        return available
+
+    def _drawer_box_depth_space(self, rect, front_back_y):
+        """Depth from the back of the drawer front to the cavity back."""
         cage_y = rect['cage_dim_y']
         # Working face frame panel: the box runs back into the host
         # cabinet's cavity, not the panel's own 3/4 reserve.
         applied_depth = self.obj.get(TAG_APPLIED_BOX_DEPTH)
         if applied_depth:
             cage_y = max(cage_y, float(applied_depth))
-        if (op_props is not None
-                and getattr(op_props, 'drawer_box_override_depth', False)):
-            return min(op_props.drawer_box_depth, cage_y - front_back_y)
-        return (cage_y - rear_clr) - front_back_y
+        return cage_y - front_back_y
 
     def _rollout_above_fit(self, op_props, rect, migrate=True):
         """rollout_above_layout for this opening, or None when it is not
@@ -13521,7 +13806,7 @@ class FaceFrameCabinet(GeoNodeCage):
             rect['reveal_bottom'],
             rect['cage_dim_z'] - max(rect['reveal_top'], 0.0),
             heights,
-            scene_props.drawer_box_bottom_clearance,
+            drawer_box_clearances(scene_props)[2],
             inch(pick_in) if pick_in is not None else None)
 
     def _migrate_rollout_above(self, op_props, rect):
@@ -14151,7 +14436,8 @@ class FaceFrameCabinet(GeoNodeCage):
         # drawer box does -- U-shape it around the chase, or shorten it
         # to clear the covers, per the opening's chase_fit.
         try:
-            rear_clr = bpy.context.scene.hb_face_frame.drawer_box_rear_clearance
+            rear_clr = drawer_box_clearances(
+                bpy.context.scene.hb_face_frame)[3]
         except AttributeError:
             rear_clr = 0.0
         dy, notch_w, notch_d = self._chase_fit_box(

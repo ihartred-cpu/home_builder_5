@@ -3045,6 +3045,23 @@ class Face_Frame_Cabinet_Style(PropertyGroup):
                         child, finish_mat, finish_mat_rotated)
                 continue
 
+            if role in ('ADA_FRONT', 'ADA_ANGLED_FRONT', 'ADA_BOTTOM'):
+                # Python-built accessible sink fronts: slot 0 on a slab
+                # (grain along the band), stile / rail / panel slots on
+                # stiles and rails.
+                me = child.data
+                if child.get('HB_STATIC_SLAB'):
+                    slots = (finish_mat_rotated or finish_mat,)
+                else:
+                    slots = (finish_mat, finish_mat_rotated or finish_mat,
+                             finish_mat)
+                while len(me.materials) < len(slots):
+                    me.materials.append(None)
+                for i, mat in enumerate(slots):
+                    if mat is not None:
+                        me.materials[i] = mat
+                continue
+
             if role in self._FRONT_ROLES:
                 # A front's paint override lives on the stable OPENING cage
                 # (fronts are wiped + rebuilt each recalc, so a prop on the
@@ -7670,6 +7687,26 @@ class Face_Frame_Cabinet_Props(PropertyGroup):
         default=units.inch(5.5), min=0.0, unit='LENGTH', precision=4,
         update=_update_cabinet_dim,
     )  # type: ignore
+    ada_front_construction: EnumProperty(
+        name="Front",
+        description="How the band across the front is built",
+        items=[
+            ('SLAB', "Slab", "One solid part"),
+            ('FRAME', "Stiles and Rails",
+             "Stiles and rails around a panel, from the door style"),
+        ],
+        default='SLAB', update=_update_cabinet_dim,
+    )  # type: ignore
+    ada_angled_front_construction: EnumProperty(
+        name="Angled Front",
+        description="How the panel that closes the rake is built",
+        items=[
+            ('SLAB', "Slab", "One solid part"),
+            ('FRAME', "Stiles and Rails",
+             "Stiles and rails around a panel, from the door style"),
+        ],
+        default='SLAB', update=_update_cabinet_dim,
+    )  # type: ignore
 
     # Floating vanity construction, on a base cabinet whose toe kick
     # is FLOATING - the kick height is then the gap the vanity hangs
@@ -8417,6 +8454,16 @@ class Face_Frame_Cabinet_Props(PropertyGroup):
         default=False,
         update=_update_cabinet_dim,
     )  # type: ignore
+    # Adjustable shelves behind the doors of a base / tall corner. Uppers
+    # always build them; lower corners opt in here. Same L / diagonal
+    # shelf parts and auto-by-height count (per-section lock overrides).
+    # Ignored while a susan interior option fills the cavity.
+    corner_adjustable_shelves: BoolProperty(
+        name="Adjustable Shelves",
+        description="Add adjustable shelves behind the doors of this corner cabinet",
+        default=False,
+        update=_update_cabinet_dim,
+    )  # type: ignore
     # ---- Finished bottom (uppers) ----
     # Finished bottom condition, matching the upper-bottom detail
     # card's options. Any non-NONE choice builds the finish panel with
@@ -8681,6 +8728,15 @@ class Face_Frame_Bay_Props(PropertyGroup):
     )  # type: ignore
     remove_carcass: BoolProperty(
         name="Remove Carcass", default=False,
+        update=_update_cabinet_dim,
+    )  # type: ignore
+    # Panel bay (Change Bay > Panel): the bay's face frame reads as a
+    # frame-and-panel. While a rail is locked its width follows the
+    # doors beside it (door-style rail + frame rail - overlay) so the
+    # panel's inner edges line up with the door panels; the rails run
+    # through and any mid stile sits between them.
+    panel_bay: BoolProperty(
+        name="Panel Bay", default=False,
         update=_update_cabinet_dim,
     )  # type: ignore
     # Per-bay override: when True this bay behaves as FLOATING regardless
@@ -9738,6 +9794,13 @@ class Face_Frame_Opening_Props(PropertyGroup):
          "cabinet required"),
         ('LIFT_UP_BIFOLD', "Deluxe Bi-fold Lift-Up",
          "Two-panel door that folds as it lifts; for taller openings"),
+        # Plain bi-fold pairs (no retract): the pair hinges on the named
+        # side and folds open, one pull on the lead leaf. Appended so
+        # stored enum values keep their meaning.
+        ('BIFOLD_LEFT', "Bi-fold (Left)",
+         "Door pair hinged on the left that folds open; pull on the right"),
+        ('BIFOLD_RIGHT', "Bi-fold (Right)",
+         "Door pair hinged on the right that folds open; pull on the left"),
     ]
     door_mechanism: EnumProperty(
         name="Door Mechanism", items=DOOR_MECHANISM_ITEMS, default='NONE',
@@ -10380,6 +10443,24 @@ class Face_Frame_Scene_Props(PropertyGroup):
         name="Include Drawer Boxes",
         description="Spawn a drawer box behind every drawer and pullout front",
         default=True,
+        update=update_include_drawer_boxes,
+    )  # type: ignore
+    # How drawer boxes are sized. Blum TANDEM sizes to the slide spec
+    # (types_face_frame.BLUM_TANDEM_*): fixed minimum clearances, stock
+    # heights, and depth to the longest runner that fits. Custom uses
+    # the clearance props below.
+    drawer_box_sizing: EnumProperty(
+        name="Drawer Box Sizing",
+        items=[
+            ('BLUM_TANDEM', "Blum TANDEM",
+             "Size boxes for Blum TANDEM BLUMOTION slides: 3/16\" sides, "
+             "9/16\" bottom, 5/16\" minimum top, stock heights, and "
+             "depth to the longest runner (9-21\") that leaves 15/16\" "
+             "behind the box"),
+            ('CUSTOM', "Custom Clearances",
+             "Size boxes from the clearances below"),
+        ],
+        default='BLUM_TANDEM',
         update=update_include_drawer_boxes,
     )  # type: ignore
     drawer_box_side_clearance: FloatProperty(
@@ -11673,6 +11754,13 @@ class Face_Frame_Scene_Props(PropertyGroup):
 
         col = layout.column(align=True)
         col.prop(props, 'include_drawer_boxes', text="Include Drawer Boxes")
+        col.prop(props, 'drawer_box_sizing', text="Sizing")
+
+        if props.drawer_box_sizing == 'BLUM_TANDEM':
+            col.separator()
+            col.label(text="Sides 3/16\", Bottom 9/16\", Top 5/16\" min")
+            col.label(text="Stock heights, runner depth (15/16\" rear min)")
+            return
 
         col.prop(props, 'use_stock_drawer_box_heights',
                  text="Stock Box Heights")
