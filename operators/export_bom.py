@@ -161,7 +161,15 @@ def format_len(scene, value):
 
 
 def clean_name(name):
-    """Strip Blender's '.001' duplicate suffix for display."""
+    """Strip Blender's '.001' duplicate suffix for display.
+
+    Only safe for names that are re-grouped by something else that already
+    disambiguates them (a part's role + dims within one assembly). Never
+    use this on an assembly root's own name -- Blender hands out '.001',
+    '.002', ... precisely because multiple cabinets are literally named
+    "Cabinet", and stripping that suffix makes distinct cabinets collide
+    under one identical label.
+    """
     base, dot, suffix = name.rpartition('.')
     if dot and suffix.isdigit():
         return base
@@ -199,7 +207,7 @@ def collect_bom(context):
             if kind is not None:
                 assemblies[obj.name] = {
                     'Room': scene.name,
-                    'Assembly': clean_name(obj.name),
+                    'Assembly': obj.name,
                     'Kind': kind,
                     'Width': '', 'Height': '', 'Depth': '',
                     'Material': '',
@@ -213,7 +221,7 @@ def collect_bom(context):
             hw_flag = next((f for f in HARDWARE_FLAGS if obj.get(f)), None)
             if hw_flag is not None:
                 root = find_assembly_root(obj)
-                assembly_name = clean_name(root.name) if root else '(Unassigned)'
+                assembly_name = root.name if root else '(Unassigned)'
                 room = scene.name
                 category = HARDWARE_FLAGS[hw_flag]
                 item_name = clean_name(obj.name)
@@ -227,9 +235,13 @@ def collect_bom(context):
                     assemblies[root.name]['Hardware Qty'] += 1
                 continue
 
-            if PART_ROLE_KEY in obj and not is_cage(obj):
+            # Non-mesh helper objects can carry a part role too -- e.g. the
+            # frameless carcass's "Overlay Prompt Obj" is a plain EMPTY used
+            # to anchor a UI prompt, not a physical part -- so exclude
+            # anything that isn't real cut geometry regardless of role.
+            if PART_ROLE_KEY in obj and not is_cage(obj) and obj.type != 'EMPTY':
                 root = find_assembly_root(obj)
-                assembly_name = clean_name(root.name) if root else '(Unassigned)'
+                assembly_name = root.name if root else '(Unassigned)'
                 room = scene.name
                 role = obj[PART_ROLE_KEY]
                 part_name = clean_name(obj.name)
